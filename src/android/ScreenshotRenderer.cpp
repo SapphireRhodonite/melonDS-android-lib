@@ -2,9 +2,11 @@
 #include "MelonLog.h"
 #include "../GPU.h"
 
-ScreenshotRenderer::ScreenshotRenderer(u32* screenshotBuffer)
+ScreenshotRenderer::ScreenshotRenderer(u32* screenshotBuffer, int screenshotWidth, int screenshotHeight)
 {
     this->screenshotBuffer = screenshotBuffer;
+    this->screenshotWidth = screenshotWidth;
+    this->screenshotHeight = screenshotHeight;
     this->currentBuffer = 0;
 }
 
@@ -20,8 +22,8 @@ void ScreenshotRenderer::renderScreenshot()
     int frontBuffer = GPU::FrontBuffer;
     if (GPU::Renderer == 0)
     {
-        memcpy(screenshotBuffer, GPU::Framebuffer[frontBuffer][0], 256 * 192 * 4);
-        memcpy(&screenshotBuffer[256 * 192], GPU::Framebuffer[frontBuffer][1], 256 * 192 * 4);
+        memcpy(screenshotBuffer, GPU::Framebuffer[frontBuffer][0], screenshotWidth * (screenshotHeight / 2) * 4);
+        memcpy(&screenshotBuffer[screenshotWidth * (screenshotHeight / 2)], GPU::Framebuffer[frontBuffer][1], screenshotWidth * (screenshotHeight / 2) * 4);
     }
     else
     {
@@ -29,7 +31,7 @@ void ScreenshotRenderer::renderScreenshot()
         glDisable(GL_DEPTH_TEST);
         glDisable(GL_STENCIL_TEST);
         glDisable(GL_BLEND);
-        glViewport(0, 0, 256, 192 * 2);
+        glViewport(0, 0, screenshotWidth, screenshotHeight);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, frameBuffers[currentBuffer]);
         glUseProgram(screenshotRenderShader);
 
@@ -53,7 +55,7 @@ void ScreenshotRenderer::renderScreenshot()
         glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
         glBindFramebuffer(GL_READ_FRAMEBUFFER, frameBuffers[screenshotBackBuffer]);
         glReadBuffer(GL_COLOR_ATTACHMENT0);
-        glReadPixels(0, 0, 256, 192 * 2, GL_RGBA, GL_UNSIGNED_BYTE, screenshotBuffer);
+        glReadPixels(0, 0, screenshotWidth, screenshotHeight, GL_RGBA, GL_UNSIGNED_BYTE, screenshotBuffer);
 
         glBindVertexArray(0);
         glBindBuffer(GL_ARRAY_BUFFER, 0);
@@ -81,7 +83,7 @@ void ScreenshotRenderer::setupFrameBuffers()
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 256, 192 * 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, screenshotWidth, screenshotHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
 
         glBindFramebuffer(GL_FRAMEBUFFER, frameBuffers[i]);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, bufferTextures[i], 0);
@@ -180,7 +182,7 @@ void ScreenshotRenderer::setupShaders()
 
 void ScreenshotRenderer::setupVertexBuffers()
 {
-    float margin = 1.0f / 192.0f;
+    float margin = 1.0f / (float)(screenshotHeight / 2);
     // Image is vertically flipped
     const float vertices[] = {
         //Position        // UV

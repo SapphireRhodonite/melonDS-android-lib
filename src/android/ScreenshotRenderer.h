@@ -7,6 +7,8 @@
 class ScreenshotRenderer {
 private:
     u32* screenshotBuffer;
+    int screenshotWidth;
+    int screenshotHeight;
     GLuint frameBuffers[2];
     GLuint bufferTextures[2];
     GLuint vao;
@@ -24,7 +26,7 @@ private:
     void setupVertexBuffers();
 
 public:
-    ScreenshotRenderer(u32* screenshotBuffer);
+    ScreenshotRenderer(u32* screenshotBuffer, int screenshotWidth, int screenshotHeight);
     void init();
     void renderScreenshot();
     u32* getScreenshot();

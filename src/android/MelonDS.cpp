@@ -55,6 +55,8 @@ namespace MelonDSAndroid
     AndroidFileHandler* fileHandler;
     AndroidCameraHandler* cameraHandler;
     std::string internalFilesDir;
+    int screenshotWidth = 256;
+    int screenshotHeight = 192 * 2;
     EmulatorConfiguration currentConfiguration;
 
     // Variables used to keep the current state so that emulation can be reset
@@ -138,14 +140,17 @@ namespace MelonDSAndroid
         RewindManager::SetRewindBufferSizes(1024 * 1024 * 20, 256 * 384 * 4);
     }
 
-    void setup(AAssetManager* androidAssetManager, AndroidCameraHandler* androidCameraHandler, RetroAchievements::RACallback* raCallback, FrameRenderedCallback* androidFrameRenderedCallback, u32* screenshotBufferPointer, long glContext, bool isMasterInstance) {
+    void setup(AAssetManager* androidAssetManager, AndroidCameraHandler* androidCameraHandler, RetroAchievements::RACallback* raCallback, FrameRenderedCallback* androidFrameRenderedCallback, u32* screenshotBufferPointer, int screenshotWidthParam, int screenshotHeightParam, long glContext, bool isMasterInstance) {
         assetManager = androidAssetManager;
         cameraHandler = androidCameraHandler;
         retroAchievementsCallback = raCallback;
         frameRenderedCallback = androidFrameRenderedCallback;
         LocalMultiplayer::SetIsMasterInstance(isMasterInstance);
         setupOpenGlContext(glContext);
-        screenshotRenderer = new ScreenshotRenderer(screenshotBufferPointer);
+        screenshotWidth = screenshotWidthParam;
+        screenshotHeight = screenshotHeightParam;
+        screenshotRenderer = new ScreenshotRenderer(screenshotBufferPointer, screenshotWidth, screenshotHeight);
+        RewindManager::SetRewindBufferSizes(1024 * 1024 * 20, screenshotWidth * screenshotHeight * 4);
 
         NDS::Init();
 
@@ -500,7 +505,7 @@ namespace MelonDSAndroid
                 success = RetroAchievements::DoSavestate(savestate);
 
             if (success)
-                memcpy(rewindSaveState.screenshot, screenshotRenderer->getScreenshot(), 256 * 384 * 4);
+                memcpy(rewindSaveState.screenshot, screenshotRenderer->getScreenshot(), screenshotWidth * screenshotHeight * 4);
 
             delete savestate;
             return success;
