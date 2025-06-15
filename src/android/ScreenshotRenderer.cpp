@@ -2,6 +2,22 @@
 #include "MelonLog.h"
 #include "../GPU.h"
 
+static void scaleScreen(const u32* src, int srcW, int srcH,
+                        u32* dst, int dstW, int dstH)
+{
+    for (int y = 0; y < dstH; y++)
+    {
+        int srcY = (y * srcH) / dstH;
+        const u32* srcRow = src + srcY * srcW;
+        u32* dstRow = dst + y * dstW;
+        for (int x = 0; x < dstW; x++)
+        {
+            int srcX = (x * srcW) / dstW;
+            dstRow[x] = srcRow[srcX];
+        }
+    }
+}
+
 ScreenshotRenderer::ScreenshotRenderer(u32* screenshotBuffer, int screenshotWidth, int screenshotHeight)
 {
     this->screenshotBuffer = screenshotBuffer;
@@ -22,8 +38,11 @@ void ScreenshotRenderer::renderScreenshot()
     int frontBuffer = GPU::FrontBuffer;
     if (GPU::Renderer == 0)
     {
-        memcpy(screenshotBuffer, GPU::Framebuffer[frontBuffer][0], screenshotWidth * (screenshotHeight / 2) * 4);
-        memcpy(&screenshotBuffer[screenshotWidth * (screenshotHeight / 2)], GPU::Framebuffer[frontBuffer][1], screenshotWidth * (screenshotHeight / 2) * 4);
+        scaleScreen(GPU::Framebuffer[frontBuffer][0], 256, 192,
+                    screenshotBuffer, screenshotWidth, screenshotHeight / 2);
+        scaleScreen(GPU::Framebuffer[frontBuffer][1], 256, 192,
+                    &screenshotBuffer[screenshotWidth * (screenshotHeight / 2)],
+                    screenshotWidth, screenshotHeight / 2);
     }
     else
     {
@@ -182,7 +201,7 @@ void ScreenshotRenderer::setupShaders()
 
 void ScreenshotRenderer::setupVertexBuffers()
 {
-    float margin = 1.0f / (float)(screenshotHeight / 2);
+    float margin = 1.0f / 192.0f;
     // Image is vertically flipped
     const float vertices[] = {
         //Position        // UV
