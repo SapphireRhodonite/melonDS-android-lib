@@ -21,6 +21,7 @@
 #include <array>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <vulkan/vulkan.h>
 
@@ -196,6 +197,17 @@ private:
         VkImageView DepthImageView = VK_NULL_HANDLE;
         VkSampler AttachmentSampler = VK_NULL_HANDLE;
         std::array<VkDescriptorImageInfo, MaxTextureDescriptors> TextureInfos{};
+    };
+
+    struct GraphicsResolvedTextureCacheEntry
+    {
+        TexcacheVulkanLoader::TextureHandle Handle = 0;
+        u32 Layer = 0;
+        VkDescriptorImageInfo DescriptorInfo{};
+        bool FallbackUsed = false;
+        bool LayerOpaque = false;
+        u32 Width = 0;
+        u32 Height = 0;
     };
 
     struct RenderContext
@@ -739,6 +751,7 @@ private:
 
     std::array<VkDescriptorImageInfo, MaxTextureDescriptors> ActiveTextureDescriptors{};
     u32 ActiveTextureDescriptorCount = 0;
+    std::unordered_map<u64, GraphicsResolvedTextureCacheEntry> GraphicsResolvedTextureCache;
 
     std::vector<TriangleGpu> Triangles;
     std::vector<GraphicsVertexGpu> GraphicsVertices;
@@ -767,6 +780,12 @@ private:
     float TimestampPeriodNs = 0.0f;
     bool TimestampQueriesSupported = false;
     PerfSampleWindow<120> RenderCpuWindow;
+    PerfSampleWindow<120> TextureUpdateCpuWindow;
+    PerfSampleWindow<120> WarmTextureCpuWindow;
+    PerfSampleWindow<120> TriangleBuildCpuWindow;
+    PerfSampleWindow<120> BufferPrepCpuWindow;
+    PerfSampleWindow<120> DescriptorUpdateCpuWindow;
+    PerfSampleWindow<120> DispatchCpuWindow;
     PerfSampleWindow<120> FenceWaitCpuWindow;
     PerfSampleWindow<120> GpuWindow;
     PerfSampleWindow<120> TriangleCountWindow;
@@ -777,6 +796,9 @@ private:
     PerfSampleWindow<120> SortCpuWindow;
     PerfSampleWindow<120> RasterCpuWindow;
     PerfSampleWindow<120> GraphicsSceneBuildCpuWindow;
+    PerfSampleWindow<120> GraphicsTextureLookupCpuWindow;
+    PerfSampleWindow<120> GraphicsVertexEmitCpuWindow;
+    PerfSampleWindow<120> GraphicsStatsCpuWindow;
     PerfSampleWindow<120> GraphicsMainCpuWindow;
     PerfSampleWindow<120> GraphicsAlphaCpuWindow;
     PerfSampleWindow<120> DepthBlendCpuWindow;
@@ -818,6 +840,8 @@ private:
     u32 LastGraphicsOpaqueClampTDrawCount = 0;
     u32 LastGraphicsOpaqueFullAlphaDrawCount = 0;
     u32 LastGraphicsOpaqueHighresRepeatModelDrawCount = 0;
+    u32 LastGraphicsTextureLookupHitCount = 0;
+    u32 LastGraphicsTextureLookupMissCount = 0;
     u64 ContextMissCount = 0;
     u64 LateFrameCount = 0;
     u64 DroppedFrameCount = 0;
@@ -844,6 +868,7 @@ private:
     u64 EarlySubmitMissCount = 0;
     u64 EarlySubmitSkipVCount215Count = 0;
     u32 CaptureDebugLogsRemaining = 0;
+    u32 SparseOpaqueDetailLogsRemaining = 0;
     u32 PaletteUiGateLogCooldown = 0;
     bool PaletteUiGateLastActive = false;
     u32 PaletteUiOpaqueReplayLogCooldown = 0;

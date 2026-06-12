@@ -102,6 +102,16 @@ Color6A5 decodeTexelRgb6a5(uvec4 texel)
     return color;
 }
 
+Color6A5 decodeTexelRgb6Opaque(uvec4 texel)
+{
+    Color6A5 color;
+    color.r = int(texel.r & 0x3Fu);
+    color.g = int(texel.g & 0x3Fu);
+    color.b = int(texel.b & 0x3Fu);
+    color.a = 31;
+    return color;
+}
+
 uvec4 fetchTextureArrayTexel(uint descriptorIndex, ivec3 coord)
 {
 #if MELONDS_DIRECT_TEXTURE_INDEXING != 0
@@ -517,7 +527,11 @@ Color6A5 sampleTexture(uint polyAttr)
             texel = downTexel;
     }
 #endif
+#if MELONDS_FAST_OPAQUE_FULL_ALPHA != 0
+    return decodeTexelRgb6Opaque(texel);
+#else
     return decodeTexelRgb6a5(texel);
+#endif
 }
 
 vec4 encodeColor(Color6A5 color)

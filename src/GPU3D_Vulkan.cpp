@@ -26,6 +26,7 @@
 #include <cstring>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -625,6 +626,7 @@ void VulkanRenderer3D::ResetActiveBackend(GPU& gpu)
 {
     (void)gpu;
     Texcache.Reset();
+    GraphicsResolvedTextureCache.clear();
     HasCpuFrame = false;
     FrameIdentical = false;
     LastSubmittedRenderPolygonCount = 0;
@@ -714,11 +716,28 @@ void VulkanRenderer3D::RenderFrameActiveBackend(GPU& gpu)
         logPerformanceIfNeeded();
     });
 
+    const u64 textureUpdateStartNs = PerfNowNs();
+    bool textureCacheInvalidated = false;
     const bool textureCacheChanged = Texcache.Update(gpu, [&]() {
-        if (Initialized && ActiveBackendMode == BackendMode::GraphicsHardware)
-            (void)waitForTextureCacheMutationSafePoint();
-    });
-    WarmTextureCache(gpu);
+        // simple_graphics uploads texture layers through the same Vulkan queue
+        // that consumes them. The upload command buffer carries shader->transfer
+        // and transfer->shader barriers, so CPU-side draining here only
+        // serializes frames. Texture destruction still waits in the Vulkan
+        // texcache loader before freeing images.
+    }, &textureCacheInvalidated);
+    if (textureCacheInvalidated)
+        GraphicsResolvedTextureCache.clear();
+    TextureUpdateCpuWindow.Add(PerfNowNs() - textureUpdateStartNs);
+    if (ActiveBackendMode != BackendMode::GraphicsHardware)
+    {
+        const u64 warmTextureStartNs = PerfNowNs();
+        WarmTextureCache(gpu);
+        WarmTextureCpuWindow.Add(PerfNowNs() - warmTextureStartNs);
+    }
+    else
+    {
+        WarmTextureCpuWindow.Add(0);
+    }
 
     const u32 scale = static_cast<u32>(std::max(1, ScaleFactor));
     const u32 targetWidth = 256u * scale;
@@ -913,7 +932,11 @@ void VulkanRenderer3D::RenderFrameActiveBackend(GPU& gpu)
         }
     }
 
+    const u64 triangleBuildStartNs = PerfNowNs();
     buildTriangleList(gpu);
+    TriangleBuildCpuWindow.Add(PerfNowNs() - triangleBuildStartNs);
+
+    const u64 bufferPrepStartNs = PerfNowNs();
     if (!ensureTriangleBuffer(renderContext, Triangles.size()))
     {
         HasCpuFrame = false;
@@ -955,6 +978,7 @@ void VulkanRenderer3D::RenderFrameActiveBackend(GPU& gpu)
         HasCpuFrame = false;
         return;
     }
+    BufferPrepCpuWindow.Add(PerfNowNs() - bufferPrepStartNs);
 
     if (ActiveBackendMode != BackendMode::GraphicsHardware)
     {
@@ -1011,7 +1035,9 @@ void VulkanRenderer3D::RenderFrameActiveBackend(GPU& gpu)
     }
     else
     {
+        const u64 descriptorUpdateStartNs = PerfNowNs();
         updateGraphicsDescriptorSet(renderContext);
+        DescriptorUpdateCpuWindow.Add(PerfNowNs() - descriptorUpdateStartNs);
     }
 
     if (captureEnabled)
@@ -1026,7 +1052,8 @@ void VulkanRenderer3D::RenderFrameActiveBackend(GPU& gpu)
     const u32 clearColor = Debug3dClearMagenta ? 0xFFFF00FFu : buildClearColorRgba8(gpu);
     updateExactCaptureFallbackColor();
     const u32 clearDepth = ((gpu.GPU3D.RenderClearAttr2 & 0x7FFFu) * 0x200u) + 0x1FFu;
-    if (!dispatchRasterAndReadback(
+    const u64 dispatchCpuStartNs = PerfNowNs();
+    const bool dispatchOk = dispatchRasterAndReadback(
             renderContext,
             clearColor,
             clearDepth,
@@ -1040,7 +1067,9 @@ void VulkanRenderer3D::RenderFrameActiveBackend(GPU& gpu)
             gpu.GPU3D.RenderEdgeTable,
             gpu.GPU3D.RenderToonTable,
             captureNeedsCpuReadback,
-            captureNeedsGpuCaptureLine))
+            captureNeedsGpuCaptureLine);
+    DispatchCpuWindow.Add(PerfNowNs() - dispatchCpuStartNs);
+    if (!dispatchOk)
     {
         HasCpuFrame = false;
         return;
@@ -2081,6 +2110,7 @@ void VulkanRenderer3D::destroyVulkan()
     GraphicsReady = false;
     ActiveTextureDescriptorCount = 0;
     ActiveTextureDescriptors.fill(VkDescriptorImageInfo{});
+    GraphicsResolvedTextureCache.clear();
     ActiveTextureSamplingPath = TextureSamplingPath::CompatDynamicUniform;
 }
 
@@ -2686,6 +2716,12 @@ void VulkanRenderer3D::logPerformanceIfNeeded()
         return;
 
     const PerfSampleWindow<120>::Summary renderSummary = RenderCpuWindow.SummarizeAndReset();
+    const PerfSampleWindow<120>::Summary textureUpdateCpuSummary = TextureUpdateCpuWindow.SummarizeAndReset();
+    const PerfSampleWindow<120>::Summary warmTextureCpuSummary = WarmTextureCpuWindow.SummarizeAndReset();
+    const PerfSampleWindow<120>::Summary triangleBuildCpuSummary = TriangleBuildCpuWindow.SummarizeAndReset();
+    const PerfSampleWindow<120>::Summary bufferPrepCpuSummary = BufferPrepCpuWindow.SummarizeAndReset();
+    const PerfSampleWindow<120>::Summary descriptorUpdateCpuSummary = DescriptorUpdateCpuWindow.SummarizeAndReset();
+    const PerfSampleWindow<120>::Summary dispatchCpuSummary = DispatchCpuWindow.SummarizeAndReset();
     const PerfSampleWindow<120>::Summary waitSummary = FenceWaitCpuWindow.SummarizeAndReset();
     const PerfSampleWindow<120>::Summary gpuSummary = GpuWindow.SummarizeAndReset();
     const PerfSampleWindow<120>::Summary triangleSummary = TriangleCountWindow.SummarizeAndReset();
@@ -2696,6 +2732,9 @@ void VulkanRenderer3D::logPerformanceIfNeeded()
     const PerfSampleWindow<120>::Summary sortCpuSummary = SortCpuWindow.SummarizeAndReset();
     const PerfSampleWindow<120>::Summary rasterCpuSummary = RasterCpuWindow.SummarizeAndReset();
     const PerfSampleWindow<120>::Summary graphicsSceneBuildCpuSummary = GraphicsSceneBuildCpuWindow.SummarizeAndReset();
+    const PerfSampleWindow<120>::Summary graphicsTextureLookupCpuSummary = GraphicsTextureLookupCpuWindow.SummarizeAndReset();
+    const PerfSampleWindow<120>::Summary graphicsVertexEmitCpuSummary = GraphicsVertexEmitCpuWindow.SummarizeAndReset();
+    const PerfSampleWindow<120>::Summary graphicsStatsCpuSummary = GraphicsStatsCpuWindow.SummarizeAndReset();
     const PerfSampleWindow<120>::Summary graphicsMainCpuSummary = GraphicsMainCpuWindow.SummarizeAndReset();
     const PerfSampleWindow<120>::Summary graphicsAlphaCpuSummary = GraphicsAlphaCpuWindow.SummarizeAndReset();
     const PerfSampleWindow<120>::Summary depthBlendCpuSummary = DepthBlendCpuWindow.SummarizeAndReset();
@@ -2868,6 +2907,30 @@ void VulkanRenderer3D::logPerformanceIfNeeded()
                 + GraphicsShadowClearPipelineCount
                 + GraphicsShadowBlendBgZeroPipelineCount
                 + GraphicsShadowBlendPipelineCount)
+        );
+        Log(
+            LogLevel::Warn,
+            "VulkanPerf[GPU3DCpu]: texUpdate avg=%.3fms p95=%.3fms warmTexture avg=%.3fms p95=%.3fms buildTriangles avg=%.3fms p95=%.3fms gfxTexLookup avg=%.3fms p95=%.3fms gfxVertexEmit avg=%.3fms p95=%.3fms gfxStats avg=%.3fms p95=%.3fms bufferPrep avg=%.3fms p95=%.3fms descriptor avg=%.3fms p95=%.3fms dispatch avg=%.3fms p95=%.3fms texLookupHit=%u texLookupMiss=%u",
+            PerfNsToMs(textureUpdateCpuSummary.MeanNs),
+            PerfNsToMs(textureUpdateCpuSummary.P95Ns),
+            PerfNsToMs(warmTextureCpuSummary.MeanNs),
+            PerfNsToMs(warmTextureCpuSummary.P95Ns),
+            PerfNsToMs(triangleBuildCpuSummary.MeanNs),
+            PerfNsToMs(triangleBuildCpuSummary.P95Ns),
+            PerfNsToMs(graphicsTextureLookupCpuSummary.MeanNs),
+            PerfNsToMs(graphicsTextureLookupCpuSummary.P95Ns),
+            PerfNsToMs(graphicsVertexEmitCpuSummary.MeanNs),
+            PerfNsToMs(graphicsVertexEmitCpuSummary.P95Ns),
+            PerfNsToMs(graphicsStatsCpuSummary.MeanNs),
+            PerfNsToMs(graphicsStatsCpuSummary.P95Ns),
+            PerfNsToMs(bufferPrepCpuSummary.MeanNs),
+            PerfNsToMs(bufferPrepCpuSummary.P95Ns),
+            PerfNsToMs(descriptorUpdateCpuSummary.MeanNs),
+            PerfNsToMs(descriptorUpdateCpuSummary.P95Ns),
+            PerfNsToMs(dispatchCpuSummary.MeanNs),
+            PerfNsToMs(dispatchCpuSummary.P95Ns),
+            LastGraphicsTextureLookupHitCount,
+            LastGraphicsTextureLookupMissCount
         );
     }
     else
@@ -7123,6 +7186,7 @@ void VulkanRenderer3D::InvalidatePresentationState(bool discardColorTarget) noex
     LastSubmittedRenderContext = nullptr;
     if (discardColorTarget)
         ColorImageInitialized = false;
+    SparseOpaqueDetailLogsRemaining = MelonDSAndroid::areRendererDebugToolsEnabled() ? 32u : 0u;
 }
 
 VulkanRenderer3D::TextureSamplingPath VulkanRenderer3D::resolveTextureSamplingPath() const noexcept
@@ -9610,6 +9674,7 @@ bool VulkanRenderer3D::dispatchGraphicsRasterAndReadback(
     VkRect2D scissor{};
     scissor.extent.width = ColorImageWidth;
     scissor.extent.height = ColorImageHeight;
+    const VkRect2D fullGraphicsScissor = scissor;
 
     auto unpackNormalizedByte = [](u32 value) -> float {
         return static_cast<float>(value & 0xFFu) * (1.0f / 255.0f);
@@ -9684,6 +9749,7 @@ bool VulkanRenderer3D::dispatchGraphicsRasterAndReadback(
     u32 boundStencilCompareMask = std::numeric_limits<u32>::max();
     u32 boundStencilWriteMask = std::numeric_limits<u32>::max();
     u32 boundStencilReference = std::numeric_limits<u32>::max();
+    VkRect2D boundGraphicsScissor = fullGraphicsScissor;
     const auto bindGraphicsPipelineCached = [&](VkPipeline pipeline) {
         if (boundGraphicsPipeline == pipeline)
             return;
@@ -9712,6 +9778,86 @@ bool VulkanRenderer3D::dispatchGraphicsRasterAndReadback(
             vkCmdSetStencilReference(commandBuffer, VK_STENCIL_FACE_FRONT_AND_BACK, reference);
             boundStencilReference = reference;
         }
+    };
+    const auto setGraphicsScissorCached = [&](const VkRect2D& nextScissor) {
+        if (boundGraphicsScissor.offset.x == nextScissor.offset.x
+            && boundGraphicsScissor.offset.y == nextScissor.offset.y
+            && boundGraphicsScissor.extent.width == nextScissor.extent.width
+            && boundGraphicsScissor.extent.height == nextScissor.extent.height)
+        {
+            return;
+        }
+
+        vkCmdSetScissor(commandBuffer, 0, 1, &nextScissor);
+        boundGraphicsScissor = nextScissor;
+    };
+    const auto fullGraphicsScissorCached = [&]() {
+        setGraphicsScissorCached(fullGraphicsScissor);
+    };
+    const auto drawGraphicsScissor = [&](const GraphicsPolygonDraw& draw) -> VkRect2D {
+        VkRect2D drawScissor = fullGraphicsScissor;
+        if (draw.triangleCount == 0u || draw.firstTriangle >= Triangles.size())
+            return drawScissor;
+
+        const u32 triangleEnd = std::min<u32>(
+            static_cast<u32>(Triangles.size()),
+            draw.firstTriangle + draw.triangleCount);
+        u32 yTop = ColorImageHeight;
+        u32 yBottom = 0u;
+        float minX = static_cast<float>(ColorImageWidth);
+        float maxX = 0.0f;
+        bool hasFiniteX = false;
+        for (u32 triangleIndex = draw.firstTriangle; triangleIndex < triangleEnd; triangleIndex++)
+        {
+            const TriangleGpu& triangle = Triangles[triangleIndex];
+            const u32 triangleYBounds = triangle.yBounds;
+            const u32 triangleYTop = triangleYBounds & 0xFFFFu;
+            const u32 triangleYBottom = (triangleYBounds >> 16u) & 0xFFFFu;
+            if (triangleYBottom > triangleYTop)
+            {
+                yTop = std::min(yTop, triangleYTop);
+                yBottom = std::max(yBottom, triangleYBottom);
+            }
+
+            const float triangleMinX = std::min({triangle.x0, triangle.x1, triangle.x2});
+            const float triangleMaxX = std::max({triangle.x0, triangle.x1, triangle.x2});
+            if (std::isfinite(triangleMinX) && std::isfinite(triangleMaxX))
+            {
+                minX = hasFiniteX ? std::min(minX, triangleMinX) : triangleMinX;
+                maxX = hasFiniteX ? std::max(maxX, triangleMaxX) : triangleMaxX;
+                hasFiniteX = true;
+            }
+        }
+
+        if (yBottom <= yTop || yTop >= ColorImageHeight)
+            return drawScissor;
+
+        const u32 yPadding = std::max<u32>(2u, static_cast<u32>(std::max(1, ScaleFactor)));
+        const u32 clippedTop = yTop > yPadding ? yTop - yPadding : 0u;
+        const u32 clippedBottom = std::min<u32>(ColorImageHeight, yBottom + yPadding);
+        if (clippedBottom <= clippedTop)
+            return drawScissor;
+
+        if (hasFiniteX && maxX > minX)
+        {
+            const int32_t xPadding = static_cast<int32_t>(
+                std::max<u32>(4u, static_cast<u32>(std::max(1, ScaleFactor)) * 2u));
+            const int32_t clippedLeft = std::max<int32_t>(
+                0,
+                static_cast<int32_t>(std::floor(minX)) - xPadding);
+            const int32_t clippedRight = std::min<int32_t>(
+                static_cast<int32_t>(ColorImageWidth),
+                static_cast<int32_t>(std::ceil(maxX)) + xPadding);
+            if (clippedRight > clippedLeft)
+            {
+                drawScissor.offset.x = clippedLeft;
+                drawScissor.extent.width = static_cast<u32>(clippedRight - clippedLeft);
+            }
+        }
+
+        drawScissor.offset.y = static_cast<int32_t>(clippedTop);
+        drawScissor.extent.height = clippedBottom - clippedTop;
+        return drawScissor;
     };
 
     const auto opaquePipelineIndexFor = [&](const GraphicsPolygonDraw& draw) -> u32 {
@@ -9814,8 +9960,7 @@ bool VulkanRenderer3D::dispatchGraphicsRasterAndReadback(
         }
 
         const u32 flags = Triangles[draw.firstTriangle].flags;
-        if (requiresWBufferFragmentDepth(draw))
-            return VK_NULL_HANDLE;
+        const bool requiresFragmentDepth = requiresWBufferFragmentDepth(draw);
 
         const u32 requiredFlags = kTriangleFlagWBuffer | kTriangleFlagTextured;
         const u32 disallowedFlags = kTriangleFlagDecal | kTriangleFlagLinear;
@@ -9827,8 +9972,16 @@ bool VulkanRenderer3D::dispatchGraphicsRasterAndReadback(
             (flags & kTriangleFlagTextureOpaque) != 0u
             && ((draw.polyAttr >> 16u) & 0x1Fu) == 0x1Fu
             && alphaRef < 0x1Fu;
+        if (requiresFragmentDepth)
+            return VK_NULL_HANDLE;
         if (blendMode == 2u && (dispCnt & (1u << 1u)) == 0u)
         {
+            if (fullAlpha)
+            {
+                VkPipeline pipeline = GraphicsOpaqueFastModulateOpaqueAlphaToonPipelines[pipelineIndex];
+                if (pipeline != VK_NULL_HANDLE)
+                    return pipeline;
+            }
             VkPipeline pipeline = GraphicsOpaqueFastModulateToonPipelines[pipelineIndex];
             if (pipeline != VK_NULL_HANDLE)
                 return pipeline;
@@ -9897,6 +10050,7 @@ bool VulkanRenderer3D::dispatchGraphicsRasterAndReadback(
         pushConstants.triangleCount = draw.triangleCount;
         vkCmdPushConstants(commandBuffer, GraphicsPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pushConstants), &pushConstants);
         setStencilStateCached(stencilCompareMask, stencilWriteMask, stencilReference);
+        setGraphicsScissorCached(drawGraphicsScissor(draw));
         vkCmdDraw(commandBuffer, draw.triangleCount * 3u, 1u, draw.firstTriangle * 3u, 0u);
         drawCount++;
         return true;
@@ -9971,6 +10125,7 @@ bool VulkanRenderer3D::dispatchGraphicsRasterAndReadback(
                     pushConstants.edgeColorPacked[i] = savedEdgeColorPacked[i];
             }
         }
+        setGraphicsScissorCached(drawGraphicsScissor(draw));
         vkCmdDrawIndexed(commandBuffer, draw.edgeIndexCount, 1u, draw.firstEdgeIndex, 0, 0u);
         drawCount++;
         return true;
@@ -9983,6 +10138,7 @@ bool VulkanRenderer3D::dispatchGraphicsRasterAndReadback(
         bindGraphicsDescriptorSetCached();
         vkCmdPushConstants(commandBuffer, GraphicsPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pushConstants), &pushConstants);
         setStencilStateCached(0x80u, 0x80u, 0x00u);
+        fullGraphicsScissorCached();
         vkCmdDraw(commandBuffer, 3u, 1u, 0u, 0u);
         drawCount++;
     };
@@ -10624,68 +10780,104 @@ bool VulkanRenderer3D::dispatchGraphicsRasterAndReadback(
         samplingBarriers
     );
 
-    const bool runEdgePass = (dispCnt & (1u << 5u)) != 0u;
+    const bool runEdgePass =
+        (dispCnt & (1u << 5u)) != 0u
+        && (graphicsPassDebugStats.edge > 0u || GraphicsHiddenAlphaZeroFinalEdgePolyIdOverride < 64u);
     const bool runFogPass = (dispCnt & (1u << 7u)) != 0u;
     const u64 finalCpuStartNs = PerfNowNs();
-    const u32 savedFinalVariantKey = pushConstants.variantKey;
-    const u32 savedFinalTriangleBase = pushConstants.triangleBase;
-    if (GraphicsHiddenAlphaZeroFinalEdgePolyIdOverride < 64u)
+    if (runEdgePass || runFogPass)
     {
-        pushConstants.variantKey = 0x80000000u | GraphicsHiddenAlphaZeroFinalEdgePolyIdOverride;
-        pushConstants.triangleBase = GraphicsHiddenAlphaZeroFinalEdgeColorOverride;
+        const u32 savedFinalVariantKey = pushConstants.variantKey;
+        const u32 savedFinalTriangleBase = pushConstants.triangleBase;
+        if (GraphicsHiddenAlphaZeroFinalEdgePolyIdOverride < 64u)
+        {
+            pushConstants.variantKey = 0x80000000u | GraphicsHiddenAlphaZeroFinalEdgePolyIdOverride;
+            pushConstants.triangleBase = GraphicsHiddenAlphaZeroFinalEdgeColorOverride;
+        }
+        else
+        {
+            pushConstants.variantKey = 0u;
+            pushConstants.triangleBase = 0u;
+        }
+
+        VkRenderPassBeginInfo finalBeginInfo{};
+        finalBeginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        finalBeginInfo.renderPass = GraphicsFinalRenderPass;
+        finalBeginInfo.framebuffer = GraphicsFinalFramebuffer;
+        finalBeginInfo.renderArea.extent.width = ColorImageWidth;
+        finalBeginInfo.renderArea.extent.height = ColorImageHeight;
+        vkCmdBeginRenderPass(commandBuffer, &finalBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+
+        if (runEdgePass && runFogPass && GraphicsFinalEdgeFogPipeline != VK_NULL_HANDLE)
+        {
+            bindGraphicsPipelineCached(GraphicsFinalEdgeFogPipeline);
+            bindGraphicsDescriptorSetCached();
+            vkCmdPushConstants(commandBuffer, GraphicsPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pushConstants), &pushConstants);
+            vkCmdDraw(commandBuffer, 3u, 1u, 0u, 0u);
+        }
+        else if (runEdgePass && GraphicsFinalEdgePipeline != VK_NULL_HANDLE)
+        {
+            bindGraphicsPipelineCached(GraphicsFinalEdgePipeline);
+            bindGraphicsDescriptorSetCached();
+            vkCmdPushConstants(commandBuffer, GraphicsPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pushConstants), &pushConstants);
+            const float edgeBlendConstants[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            vkCmdSetBlendConstants(commandBuffer, edgeBlendConstants);
+            vkCmdDraw(commandBuffer, 3u, 1u, 0u, 0u);
+        }
+
+        if (!(runEdgePass && runFogPass && GraphicsFinalEdgeFogPipeline != VK_NULL_HANDLE)
+            && runFogPass && GraphicsFinalFogPipeline != VK_NULL_HANDLE)
+        {
+            bindGraphicsPipelineCached(GraphicsFinalFogPipeline);
+            bindGraphicsDescriptorSetCached();
+            vkCmdPushConstants(commandBuffer, GraphicsPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pushConstants), &pushConstants);
+            const float fogBlendConstants[4] = {
+                static_cast<float>(fogColor & 0x1Fu) * (1.0f / 31.0f),
+                static_cast<float>((fogColor >> 5u) & 0x1Fu) * (1.0f / 31.0f),
+                static_cast<float>((fogColor >> 10u) & 0x1Fu) * (1.0f / 31.0f),
+                static_cast<float>((fogColor >> 16u) & 0x1Fu) * (1.0f / 31.0f),
+            };
+            vkCmdSetBlendConstants(commandBuffer, fogBlendConstants);
+            vkCmdDraw(commandBuffer, 3u, 1u, 0u, 0u);
+        }
+
+        pushConstants.variantKey = savedFinalVariantKey;
+        pushConstants.triangleBase = savedFinalTriangleBase;
+        vkCmdEndRenderPass(commandBuffer);
     }
     else
     {
-        pushConstants.variantKey = 0u;
-        pushConstants.triangleBase = 0u;
+        VkImageMemoryBarrier colorToGeneralBarrier{};
+        colorToGeneralBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        colorToGeneralBarrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        colorToGeneralBarrier.dstAccessMask =
+            VK_ACCESS_SHADER_READ_BIT |
+            VK_ACCESS_TRANSFER_READ_BIT |
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        colorToGeneralBarrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        colorToGeneralBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        colorToGeneralBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        colorToGeneralBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        colorToGeneralBarrier.image = ColorImage;
+        colorToGeneralBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        colorToGeneralBarrier.subresourceRange.baseMipLevel = 0;
+        colorToGeneralBarrier.subresourceRange.levelCount = 1;
+        colorToGeneralBarrier.subresourceRange.baseArrayLayer = 0;
+        colorToGeneralBarrier.subresourceRange.layerCount = 1;
+        vkCmdPipelineBarrier(
+            commandBuffer,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+            0,
+            0,
+            nullptr,
+            0,
+            nullptr,
+            1,
+            &colorToGeneralBarrier);
     }
-
-    VkRenderPassBeginInfo finalBeginInfo{};
-    finalBeginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    finalBeginInfo.renderPass = GraphicsFinalRenderPass;
-    finalBeginInfo.framebuffer = GraphicsFinalFramebuffer;
-    finalBeginInfo.renderArea.extent.width = ColorImageWidth;
-    finalBeginInfo.renderArea.extent.height = ColorImageHeight;
-    vkCmdBeginRenderPass(commandBuffer, &finalBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
-    vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
-    vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
-
-    if (runEdgePass && runFogPass && GraphicsFinalEdgeFogPipeline != VK_NULL_HANDLE)
-    {
-        bindGraphicsPipelineCached(GraphicsFinalEdgeFogPipeline);
-        bindGraphicsDescriptorSetCached();
-        vkCmdPushConstants(commandBuffer, GraphicsPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pushConstants), &pushConstants);
-        vkCmdDraw(commandBuffer, 3u, 1u, 0u, 0u);
-    }
-    else if (runEdgePass && GraphicsFinalEdgePipeline != VK_NULL_HANDLE)
-    {
-        bindGraphicsPipelineCached(GraphicsFinalEdgePipeline);
-        bindGraphicsDescriptorSetCached();
-        vkCmdPushConstants(commandBuffer, GraphicsPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pushConstants), &pushConstants);
-        const float edgeBlendConstants[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-        vkCmdSetBlendConstants(commandBuffer, edgeBlendConstants);
-        vkCmdDraw(commandBuffer, 3u, 1u, 0u, 0u);
-    }
-
-    if (!(runEdgePass && runFogPass && GraphicsFinalEdgeFogPipeline != VK_NULL_HANDLE)
-        && runFogPass && GraphicsFinalFogPipeline != VK_NULL_HANDLE)
-    {
-        bindGraphicsPipelineCached(GraphicsFinalFogPipeline);
-        bindGraphicsDescriptorSetCached();
-        vkCmdPushConstants(commandBuffer, GraphicsPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pushConstants), &pushConstants);
-        const float fogBlendConstants[4] = {
-            static_cast<float>(fogColor & 0x1Fu) * (1.0f / 31.0f),
-            static_cast<float>((fogColor >> 5u) & 0x1Fu) * (1.0f / 31.0f),
-            static_cast<float>((fogColor >> 10u) & 0x1Fu) * (1.0f / 31.0f),
-            static_cast<float>((fogColor >> 16u) & 0x1Fu) * (1.0f / 31.0f),
-        };
-        vkCmdSetBlendConstants(commandBuffer, fogBlendConstants);
-        vkCmdDraw(commandBuffer, 3u, 1u, 0u, 0u);
-    }
-
-    pushConstants.variantKey = savedFinalVariantKey;
-    pushConstants.triangleBase = savedFinalTriangleBase;
-    vkCmdEndRenderPass(commandBuffer);
     FinalCpuWindow.Add(PerfNowNs() - finalCpuStartNs);
 
     if ((timestampQueryPool != VK_NULL_HANDLE) && timestampPending)
@@ -11871,16 +12063,22 @@ void VulkanRenderer3D::buildGraphicsTriangleList(GPU& gpu)
 {
     struct TextureFrameData
     {
+        TexcacheVulkanLoader::TextureHandle Handle = 0;
+        u32 Layer = 0;
         u32 DescriptorIndex = 0;
+        bool FallbackUsed = false;
+        bool LayerOpaque = false;
+        u32 Width = 0;
+        u32 Height = 0;
     };
 
     struct TextureLookupKey
     {
-        TexcacheVulkanLoader::TextureHandle Handle = 0;
+        u64 Key = 0;
 
         bool operator==(const TextureLookupKey& other) const noexcept
         {
-            return Handle == other.Handle;
+            return Key == other.Key;
         }
     };
 
@@ -11888,7 +12086,7 @@ void VulkanRenderer3D::buildGraphicsTriangleList(GPU& gpu)
     {
         size_t operator()(const TextureLookupKey& key) const noexcept
         {
-            return std::hash<u64>{}(key.Handle);
+            return std::hash<u64>{}(key.Key);
         }
     };
 
@@ -11938,6 +12136,23 @@ void VulkanRenderer3D::buildGraphicsTriangleList(GPU& gpu)
 
     std::unordered_map<TextureLookupKey, TextureFrameData, TextureLookupHasher> textureLookup{};
     textureLookup.reserve(SharedGraphicsScene.Draws.size());
+    u32 textureLookupHitCount = 0;
+    u32 textureLookupMissCount = 0;
+    u64 textureLookupCpuNs = 0;
+    u64 vertexEmitCpuNs = 0;
+
+    const auto makeTextureLookupKey = [](u32 texParam, u32 texPalette) -> TextureLookupKey {
+        u32 normalizedTexParam = texParam & ~0xC00F0000u;
+        const u32 textureFormat = (normalizedTexParam >> 26u) & 0x7u;
+        u64 key = normalizedTexParam;
+        if (textureFormat != 7u)
+        {
+            key |= static_cast<u64>(texPalette) << 32u;
+            if (textureFormat == 5u)
+                key &= ~(static_cast<u64>(1u) << 29u);
+        }
+        return TextureLookupKey{key};
+    };
 
     const auto to8From6 = [](u32 c6) -> u32 {
         c6 &= 0x3Fu;
@@ -12040,6 +12255,39 @@ void VulkanRenderer3D::buildGraphicsTriangleList(GPU& gpu)
         return (polygonYTop & 0xFFFFu) | ((polygonYBot & 0xFFFFu) << 16u);
     };
 
+    std::unordered_set<TextureLookupKey, TextureLookupHasher> reservedAlphaTextureKeys{};
+    reservedAlphaTextureKeys.reserve(std::min<size_t>(SharedGraphicsScene.Draws.size(), MaxActiveTextureDescriptors));
+    for (const AcceleratedSceneDraw& sceneDraw : SharedGraphicsScene.Draws)
+    {
+        const Polygon* polygon = sceneDraw.SourcePolygon;
+        if (polygon == nullptr)
+            continue;
+
+        const AcceleratedPolygonMeta& polygonMeta = sceneDraw.Meta;
+        const bool polygonTexturedByRegs = textureMapsEnabled && (((polygon->TexParam >> 26u) & 0x7u) != 0u);
+        if (!polygonTexturedByRegs)
+            continue;
+        if (!Renderer3DDebugShouldDrawPolygon(
+                polygonMeta,
+                sceneDraw.PrimitiveType == AcceleratedPrimitiveType::Lines,
+                true,
+                highlightEnabled))
+        {
+            continue;
+        }
+
+        const std::optional<u32> debugYBounds = packSceneDrawYBounds(sceneDraw);
+        if (debugYBounds.has_value() && !Renderer3DDebugYBoundsEnabled(*debugYBounds, targetHeight))
+            continue;
+
+        const u32 alpha5 = polygonMeta.Alpha5;
+        const bool polygonUsesGlTranslucentPass =
+            HasAcceleratedPolygonFlag(polygonMeta, AcceleratedPolygonFlagTranslucent);
+        const bool isTranslucent = polygonUsesGlTranslucentPass || (alpha5 != 0u && alpha5 < 0x1Fu);
+        if (isTranslucent)
+            reservedAlphaTextureKeys.insert(makeTextureLookupKey(polygon->TexParam, polygon->TexPalette));
+    }
+
     for (const AcceleratedSceneDraw& sceneDraw : SharedGraphicsScene.Draws)
     {
         const Polygon* polygon = sceneDraw.SourcePolygon;
@@ -12079,17 +12327,9 @@ void VulkanRenderer3D::buildGraphicsTriangleList(GPU& gpu)
         bool textureLayerOpaque = false;
         u32 texWidth = 0u;
         u32 texHeight = 0u;
+        const u64 textureLookupStartNs = PerfNowNs();
         if (polygonTextured)
         {
-            Texcache.GetTexture(
-                gpu,
-                polygon->TexParam,
-                polygon->TexPalette,
-                textureHandle,
-                textureLayer,
-                helper
-            );
-
             texWidth = TextureWidth(polygon->TexParam);
             texHeight = TextureHeight(polygon->TexParam);
             if (texWidth == 0u || texHeight == 0u)
@@ -12098,18 +12338,90 @@ void VulkanRenderer3D::buildGraphicsTriangleList(GPU& gpu)
             }
             else
             {
-                const TextureLookupKey textureKey{textureHandle};
+                const TextureLookupKey textureKey = makeTextureLookupKey(
+                    polygon->TexParam,
+                    polygon->TexPalette);
+                const u32 textureFormat = (polygon->TexParam >> 26u) & 0x7u;
+                const bool color0Transparent = (polygon->TexParam & (1u << 29u)) != 0u;
+                const bool persistentTextureCacheAllowed =
+                    (textureFormat == 4u || textureFormat == 5u)
+                    && !color0Transparent
+                    && alpha5 == 31u
+                    && blendMode == 0u;
                 auto textureIt = textureLookup.find(textureKey);
                 if (textureIt == textureLookup.end())
                 {
-                    VkDescriptorImageInfo textureDescriptorInfo{};
-                    if (Texcache.GetLoader().GetTextureDescriptor(textureHandle, &textureDescriptorInfo)
-                        && ActiveTextureDescriptorCount < MaxActiveTextureDescriptors)
+                    textureLookupMissCount++;
+                    GraphicsResolvedTextureCacheEntry resolvedTexture{};
+                    bool resolvedTextureValid = false;
+                    const auto persistentTextureIt = persistentTextureCacheAllowed
+                        ? GraphicsResolvedTextureCache.find(textureKey.Key)
+                        : GraphicsResolvedTextureCache.end();
+                    if (persistentTextureIt != GraphicsResolvedTextureCache.end())
+                    {
+                        resolvedTexture = persistentTextureIt->second;
+                        resolvedTextureValid = true;
+                    }
+                    else
+                    {
+                        Texcache.GetTexture(
+                            gpu,
+                            polygon->TexParam,
+                            polygon->TexPalette,
+                            textureHandle,
+                            textureLayer,
+                            helper
+                        );
+
+                        VkDescriptorImageInfo textureDescriptorInfo{};
+                        if (Texcache.GetLoader().GetTextureDescriptor(
+                                textureHandle,
+                                &textureDescriptorInfo))
+                        {
+                            resolvedTexture.Handle = textureHandle;
+                            resolvedTexture.Layer = textureLayer;
+                            resolvedTexture.DescriptorInfo = textureDescriptorInfo;
+                            resolvedTexture.FallbackUsed = false;
+                            resolvedTexture.LayerOpaque = Texcache.GetLoader().IsTextureLayerOpaque(textureHandle, textureLayer);
+                            resolvedTexture.Width = texWidth;
+                            resolvedTexture.Height = texHeight;
+                            resolvedTextureValid = true;
+                            if (persistentTextureCacheAllowed)
+                                GraphicsResolvedTextureCache.emplace(textureKey.Key, resolvedTexture);
+                        }
+                    }
+
+                    const auto reservedAlphaTextureIt = reservedAlphaTextureKeys.find(textureKey);
+                    const bool reservedAlphaTexture = reservedAlphaTextureIt != reservedAlphaTextureKeys.end();
+                    const u32 reservedAlphaTextureCount =
+                        std::min<u32>(static_cast<u32>(reservedAlphaTextureKeys.size()), MaxActiveTextureDescriptors);
+                    const bool descriptorSlotAvailable =
+                        ActiveTextureDescriptorCount < MaxActiveTextureDescriptors
+                        && (reservedAlphaTexture
+                            || (ActiveTextureDescriptorCount + reservedAlphaTextureCount) < MaxActiveTextureDescriptors);
+                    if (resolvedTextureValid && descriptorSlotAvailable)
                     {
                         textureDescriptorIndex = ActiveTextureDescriptorCount;
-                        ActiveTextureDescriptors[textureDescriptorIndex] = textureDescriptorInfo;
+                        ActiveTextureDescriptors[textureDescriptorIndex] = resolvedTexture.DescriptorInfo;
                         ActiveTextureDescriptorCount++;
-                        textureLookup.emplace(textureKey, TextureFrameData{textureDescriptorIndex});
+                        textureHandle = resolvedTexture.Handle;
+                        textureLayer = resolvedTexture.Layer;
+                        textureLayerOpaque = resolvedTexture.LayerOpaque;
+                        texWidth = resolvedTexture.Width;
+                        texHeight = resolvedTexture.Height;
+                        textureLookup.emplace(
+                            textureKey,
+                            TextureFrameData{
+                                textureHandle,
+                                textureLayer,
+                                textureDescriptorIndex,
+                                resolvedTexture.FallbackUsed,
+                                textureLayerOpaque,
+                                texWidth,
+                                texHeight,
+                            });
+                        if (reservedAlphaTexture)
+                            reservedAlphaTextureKeys.erase(reservedAlphaTextureIt);
                     }
                     else
                     {
@@ -12119,16 +12431,34 @@ void VulkanRenderer3D::buildGraphicsTriangleList(GPU& gpu)
                         texHeight = 1u;
                         textureFallbackUsed = true;
                         textureLayerOpaque = true;
+                        textureLookup.emplace(
+                            textureKey,
+                            TextureFrameData{
+                                0,
+                                textureLayer,
+                                textureDescriptorIndex,
+                                true,
+                                textureLayerOpaque,
+                                texWidth,
+                                texHeight,
+                            });
                     }
                 }
                 else
                 {
-                    textureDescriptorIndex = textureIt->second.DescriptorIndex;
+                    textureLookupHitCount++;
+                    const TextureFrameData& textureData = textureIt->second;
+                    textureHandle = textureData.Handle;
+                    textureLayer = textureData.Layer;
+                    textureDescriptorIndex = textureData.DescriptorIndex;
+                    textureFallbackUsed = textureData.FallbackUsed;
+                    textureLayerOpaque = textureData.LayerOpaque;
+                    texWidth = textureData.Width;
+                    texHeight = textureData.Height;
                 }
-                if (!textureFallbackUsed)
-                    textureLayerOpaque = Texcache.GetLoader().IsTextureLayerOpaque(textureHandle, textureLayer);
             }
         }
+        textureLookupCpuNs += PerfNowNs() - textureLookupStartNs;
 
         const bool hasTexture = polygonTextured && texWidth > 0u && texHeight > 0u;
         u32 sceneVertexFlags = 0u;
@@ -12179,6 +12509,7 @@ void VulkanRenderer3D::buildGraphicsTriangleList(GPU& gpu)
             return graphicsVertex;
         };
 
+        u64 vertexEmitStartNs = PerfNowNs();
         for (u32 vertexOffset = 0; vertexOffset < sceneDraw.VertexCount; vertexOffset++)
         {
             const u32 sceneVertexIndex = sceneDraw.FirstVertex + vertexOffset;
@@ -12186,6 +12517,7 @@ void VulkanRenderer3D::buildGraphicsTriangleList(GPU& gpu)
                 break;
             GraphicsSceneVertices[sceneVertexIndex] = makeSceneGraphicsVertex(SharedGraphicsScene.Vertices[sceneVertexIndex]);
         }
+        vertexEmitCpuNs += PerfNowNs() - vertexEmitStartNs;
 
         const auto makeTriangleVertex = [&](const AcceleratedSceneVertex& vertex,
                                             float x,
@@ -12455,6 +12787,7 @@ void VulkanRenderer3D::buildGraphicsTriangleList(GPU& gpu)
 
         if (sceneDraw.PrimitiveType == AcceleratedPrimitiveType::Lines)
         {
+            vertexEmitStartNs = PerfNowNs();
             if (sceneDraw.IndexCount < 2u || (sceneDraw.FirstIndex + 1u) >= SharedGraphicsScene.Indices.size())
                 continue;
 
@@ -12465,11 +12798,13 @@ void VulkanRenderer3D::buildGraphicsTriangleList(GPU& gpu)
 
             appendLineSegment(vertexIndex0, vertexIndex1);
             enqueueGraphicsDraw(Triangles.size() - polygonTriangleBase);
+            vertexEmitCpuNs += PerfNowNs() - vertexEmitStartNs;
             continue;
         }
 
         if (alpha5 == 0u)
         {
+            vertexEmitStartNs = PerfNowNs();
             const bool hiddenLayerAlphaZero =
                 !hasTexture
                 && blendMode == 0u
@@ -12554,9 +12889,11 @@ void VulkanRenderer3D::buildGraphicsTriangleList(GPU& gpu)
                 false,
                 wireframeEdgeColorOverrideMask,
                 wireframeEdgeColorOverridePacked);
+            vertexEmitCpuNs += PerfNowNs() - vertexEmitStartNs;
             continue;
         }
 
+        vertexEmitStartNs = PerfNowNs();
         for (u32 triangleIndex = sceneDraw.FirstTriangle;
              triangleIndex < sceneDraw.FirstTriangle + sceneDraw.TriangleCount;
              triangleIndex++)
@@ -12595,7 +12932,12 @@ void VulkanRenderer3D::buildGraphicsTriangleList(GPU& gpu)
         }
 
         enqueueGraphicsDraw(Triangles.size() - polygonTriangleBase);
+        vertexEmitCpuNs += PerfNowNs() - vertexEmitStartNs;
     }
+
+    const u64 graphicsStatsStartNs = PerfNowNs();
+    LastGraphicsTextureLookupHitCount = textureLookupHitCount;
+    LastGraphicsTextureLookupMissCount = textureLookupMissCount;
 
     LastGraphicsOpaqueDrawCount = static_cast<u32>(GraphicsOpaqueDrawIndices.size());
     LastGraphicsNeedOpaqueDrawCount = static_cast<u32>(GraphicsNeedOpaqueDrawIndices.size());
@@ -12695,6 +13037,91 @@ void VulkanRenderer3D::buildGraphicsTriangleList(GPU& gpu)
         }
         if ((firstTriangleFlags & kTriangleFlagLinear) != 0u)
             LastGraphicsOpaqueLinearDrawCount++;
+    }
+
+    if (MelonDSAndroid::areRendererDebugToolsEnabled()
+        && SparseOpaqueDetailLogsRemaining > 0u
+        && ScaleFactor >= 8
+        && LastGraphicsOpaqueDrawCount > 0u
+        && LastGraphicsOpaqueDrawCount <= 4u
+        && LastGraphicsOpaqueFullAlphaDrawCount == LastGraphicsOpaqueDrawCount)
+    {
+        Log(
+            LogLevel::Warn,
+            "VulkanGraphics[SparseOpaqueScene]: scale=%d opaque=%u needOpaque=%u alpha=%u textures=%u triangles=%zu repeat=%u mirror=%u clampT=%u fullAlpha=%u",
+            ScaleFactor,
+            LastGraphicsOpaqueDrawCount,
+            LastGraphicsNeedOpaqueDrawCount,
+            LastGraphicsAlphaDrawCount,
+            ActiveTextureDescriptorCount,
+            Triangles.size(),
+            LastGraphicsOpaqueRepeatDrawCount,
+            LastGraphicsOpaqueMirrorDrawCount,
+            LastGraphicsOpaqueClampTDrawCount,
+            LastGraphicsOpaqueFullAlphaDrawCount);
+        SparseOpaqueDetailLogsRemaining--;
+
+        for (u32 drawIndex : GraphicsOpaqueDrawIndices)
+        {
+            if (SparseOpaqueDetailLogsRemaining == 0u || drawIndex >= GraphicsPolygons.size())
+                break;
+
+            const GraphicsPolygonDraw& draw = GraphicsPolygons[drawIndex];
+            const u32 triangleEnd = std::min<u32>(
+                static_cast<u32>(Triangles.size()),
+                draw.firstTriangle + draw.triangleCount);
+            float minX = std::numeric_limits<float>::max();
+            float minY = std::numeric_limits<float>::max();
+            float maxX = std::numeric_limits<float>::lowest();
+            float maxY = std::numeric_limits<float>::lowest();
+            float minU = std::numeric_limits<float>::max();
+            float minV = std::numeric_limits<float>::max();
+            float maxU = std::numeric_limits<float>::lowest();
+            float maxV = std::numeric_limits<float>::lowest();
+            bool hasBounds = false;
+            for (u32 triangleIndex = draw.firstTriangle; triangleIndex < triangleEnd; triangleIndex++)
+            {
+                const TriangleGpu& tri = Triangles[triangleIndex];
+                minX = std::min({minX, tri.x0, tri.x1, tri.x2});
+                minY = std::min({minY, tri.y0, tri.y1, tri.y2});
+                maxX = std::max({maxX, tri.x0, tri.x1, tri.x2});
+                maxY = std::max({maxY, tri.y0, tri.y1, tri.y2});
+                minU = std::min({minU, tri.u0, tri.u1, tri.u2});
+                minV = std::min({minV, tri.v0, tri.v1, tri.v2});
+                maxU = std::max({maxU, tri.u0, tri.u1, tri.u2});
+                maxV = std::max({maxV, tri.v0, tri.v1, tri.v2});
+                hasBounds = true;
+            }
+
+            if (!hasBounds || draw.firstTriangle >= Triangles.size())
+                continue;
+
+            const TriangleGpu& tri = Triangles[draw.firstTriangle];
+            Log(
+                LogLevel::Warn,
+                "VulkanGraphics[SparseOpaqueDraw]: draw=%u triBase=%u triCount=%u polyAttr=%#x flags=%#x triFlags=%#x texDesc=%u texLayer=%u texSize=%ux%u texParam=%#x xy=(%.1f,%.1f)..(%.1f,%.1f) uv=(%.1f,%.1f)..(%.1f,%.1f) yBounds=%#x",
+                drawIndex,
+                draw.firstTriangle,
+                draw.triangleCount,
+                draw.polyAttr,
+                draw.flags,
+                tri.flags,
+                tri.texArrayIndex,
+                tri.texLayer,
+                tri.texWidth,
+                tri.texHeight,
+                tri.texParam,
+                minX,
+                minY,
+                maxX,
+                maxY,
+                minU,
+                minV,
+                maxU,
+                maxV,
+                tri.yBounds);
+            SparseOpaqueDetailLogsRemaining--;
+        }
     }
 
     if (MelonDSAndroid::areRendererDebugToolsEnabled() && CaptureDebugLogsRemaining > 0u)
@@ -12860,6 +13287,9 @@ void VulkanRenderer3D::buildGraphicsTriangleList(GPU& gpu)
         }
         loggedGraphicsTriangleSummary = true;
     }
+    GraphicsTextureLookupCpuWindow.Add(textureLookupCpuNs);
+    GraphicsVertexEmitCpuWindow.Add(vertexEmitCpuNs);
+    GraphicsStatsCpuWindow.Add(PerfNowNs() - graphicsStatsStartNs);
 }
 
 void VulkanRenderer3D::buildTriangleList(GPU& gpu)

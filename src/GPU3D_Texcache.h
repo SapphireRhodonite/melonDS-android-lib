@@ -97,8 +97,11 @@ public:
     }
 
     template <typename BeforeMutationT>
-    bool Update(GPU& gpu, BeforeMutationT&& beforeMutation)
+    bool Update(GPU& gpu, BeforeMutationT&& beforeMutation, bool* invalidatedAny = nullptr)
     {
+        if (invalidatedAny != nullptr)
+            *invalidatedAny = false;
+
         auto textureDirty = gpu.VRAMDirty_Texture.DeriveState(gpu.VRAMMap_Texture, gpu);
         auto texPalDirty = gpu.VRAMDirty_TexPal.DeriveState(gpu.VRAMMap_TexPal, gpu);
 
@@ -136,6 +139,8 @@ public:
                 it++;
                 continue;
             invalidate:
+                if (invalidatedAny != nullptr)
+                    *invalidatedAny = true;
                 FreeTextures[entry.WidthLog2][entry.HeightLog2].push_back(entry.Texture);
 
                 //printf("invalidating texture %d\n", entry.ImageDescriptor);
