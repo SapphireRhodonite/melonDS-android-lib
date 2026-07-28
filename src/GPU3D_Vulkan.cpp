@@ -72,6 +72,8 @@ melonDS::u32 getVulkanDiagnosticFlags();
 
 namespace melonDS
 {
+
+constexpr uint64_t kFenceWaitTimeoutNs = 2'000'000'000ull;
 using Platform::Log;
 using Platform::LogLevel;
 
@@ -2218,7 +2220,7 @@ bool VulkanRenderer3D::waitForRenderContext(RenderContext& context)
         ContextMissCount++;
 
     const u64 waitStartNs = PerfNowNs();
-    const VkResult waitResult = vkWaitForFences(Device, 1, &context.FrameFence, VK_TRUE, UINT64_MAX);
+    const VkResult waitResult = vkWaitForFences(Device, 1, &context.FrameFence, VK_TRUE, kFenceWaitTimeoutNs);
     if (waitResult != VK_SUCCESS)
     {
         Log(LogLevel::Error, "VulkanRenderer3D: render context fence wait failed (%d)", static_cast<int>(waitResult));
@@ -2319,7 +2321,7 @@ bool VulkanRenderer3D::waitForReadbackSource()
         }
 
         const u64 waitStartNs = PerfNowNs();
-        const VkResult waitResult = vkWaitForFences(Device, 1, &FrameFence, VK_TRUE, UINT64_MAX);
+        const VkResult waitResult = vkWaitForFences(Device, 1, &FrameFence, VK_TRUE, kFenceWaitTimeoutNs);
         if (waitResult != VK_SUCCESS)
         {
             Log(LogLevel::Error, "VulkanRenderer3D: frame fence wait failed (%d)", static_cast<int>(waitResult));
@@ -2359,7 +2361,7 @@ bool VulkanRenderer3D::waitForTextureCacheMutationSafePoint()
         else if (fenceStatus == VK_NOT_READY)
         {
             const u64 waitStartNs = PerfNowNs();
-            const VkResult waitResult = vkWaitForFences(Device, 1, &FrameFence, VK_TRUE, UINT64_MAX);
+            const VkResult waitResult = vkWaitForFences(Device, 1, &FrameFence, VK_TRUE, kFenceWaitTimeoutNs);
             if (waitResult == VK_SUCCESS)
             {
                 const u64 waitDurationNs = PerfNowNs() - waitStartNs;
@@ -6729,7 +6731,7 @@ bool VulkanRenderer3D::createFallbackTexture()
     *reinterpret_cast<u32*>(mappedMemory) = 0x1F3F3F3Fu;
     vkUnmapMemory(Device, FallbackTextureStagingMemory);
 
-    if (vkWaitForFences(Device, 1, &FrameFence, VK_TRUE, UINT64_MAX) != VK_SUCCESS
+    if (vkWaitForFences(Device, 1, &FrameFence, VK_TRUE, kFenceWaitTimeoutNs) != VK_SUCCESS
         || vkResetFences(Device, 1, &FrameFence) != VK_SUCCESS
         || vkResetCommandBuffer(CommandBuffer, 0) != VK_SUCCESS)
     {
@@ -6842,7 +6844,7 @@ bool VulkanRenderer3D::createFallbackTexture()
         }
     }
 
-    if (vkWaitForFences(Device, 1, &FrameFence, VK_TRUE, UINT64_MAX) != VK_SUCCESS)
+    if (vkWaitForFences(Device, 1, &FrameFence, VK_TRUE, kFenceWaitTimeoutNs) != VK_SUCCESS)
     {
         destroyFallbackTexture();
         return false;
@@ -7848,7 +7850,7 @@ bool VulkanRenderer3D::dispatchRasterAndReadback(
     if (useSynchronousContext)
     {
         const u64 waitStartNs = PerfNowNs();
-        const VkResult waitResult = vkWaitForFences(Device, 1, &FrameFence, VK_TRUE, UINT64_MAX);
+        const VkResult waitResult = vkWaitForFences(Device, 1, &FrameFence, VK_TRUE, kFenceWaitTimeoutNs);
         if (waitResult != VK_SUCCESS)
         {
             Log(LogLevel::Error, "VulkanRenderer3D: vkWaitForFences failed (%d)", static_cast<int>(waitResult));
@@ -9260,7 +9262,7 @@ bool VulkanRenderer3D::dispatchRasterAndReadback(
     if ((readbackToCpu && !deferCaptureReadbackCompletion) || useSynchronousContext)
     {
         const u64 waitStartNs = PerfNowNs();
-        if (vkWaitForFences(Device, 1, &FrameFence, VK_TRUE, UINT64_MAX) != VK_SUCCESS)
+        if (vkWaitForFences(Device, 1, &FrameFence, VK_TRUE, kFenceWaitTimeoutNs) != VK_SUCCESS)
         {
             Log(LogLevel::Error, "VulkanRenderer3D: completion fence wait failed");
             return false;
@@ -9398,7 +9400,7 @@ bool VulkanRenderer3D::dispatchGraphicsRasterAndReadback(
     if (useSynchronousContext)
     {
         const u64 waitStartNs = PerfNowNs();
-        const VkResult waitResult = vkWaitForFences(Device, 1, &frameFence, VK_TRUE, UINT64_MAX);
+        const VkResult waitResult = vkWaitForFences(Device, 1, &frameFence, VK_TRUE, kFenceWaitTimeoutNs);
         if (waitResult != VK_SUCCESS)
         {
             Log(LogLevel::Error, "VulkanRenderer3D: graphics vkWaitForFences failed (%d)", static_cast<int>(waitResult));
@@ -11428,7 +11430,7 @@ bool VulkanRenderer3D::readbackGraphicsAttrImageToCpu(std::vector<u32>& outAttrP
             return false;
     }
 
-    if (vkWaitForFences(Device, 1, &FrameFence, VK_TRUE, UINT64_MAX) != VK_SUCCESS)
+    if (vkWaitForFences(Device, 1, &FrameFence, VK_TRUE, kFenceWaitTimeoutNs) != VK_SUCCESS)
         return false;
     if (vkResetFences(Device, 1, &FrameFence) != VK_SUCCESS)
         return false;
@@ -11492,7 +11494,7 @@ bool VulkanRenderer3D::readbackGraphicsAttrImageToCpu(std::vector<u32>& outAttrP
         if (vkQueueSubmit(Queue, 1, &submitInfo, FrameFence) != VK_SUCCESS)
             return false;
     }
-    if (vkWaitForFences(Device, 1, &FrameFence, VK_TRUE, UINT64_MAX) != VK_SUCCESS)
+    if (vkWaitForFences(Device, 1, &FrameFence, VK_TRUE, kFenceWaitTimeoutNs) != VK_SUCCESS)
         return false;
     if (ReadbackMapped == nullptr)
         return false;
@@ -11521,7 +11523,7 @@ bool VulkanRenderer3D::readbackGraphicsDepthImageToCpu(std::vector<u32>& outDept
             return false;
     }
 
-    if (vkWaitForFences(Device, 1, &FrameFence, VK_TRUE, UINT64_MAX) != VK_SUCCESS)
+    if (vkWaitForFences(Device, 1, &FrameFence, VK_TRUE, kFenceWaitTimeoutNs) != VK_SUCCESS)
         return false;
     if (vkResetFences(Device, 1, &FrameFence) != VK_SUCCESS)
         return false;
@@ -11585,7 +11587,7 @@ bool VulkanRenderer3D::readbackGraphicsDepthImageToCpu(std::vector<u32>& outDept
         if (vkQueueSubmit(Queue, 1, &submitInfo, FrameFence) != VK_SUCCESS)
             return false;
     }
-    if (vkWaitForFences(Device, 1, &FrameFence, VK_TRUE, UINT64_MAX) != VK_SUCCESS)
+    if (vkWaitForFences(Device, 1, &FrameFence, VK_TRUE, kFenceWaitTimeoutNs) != VK_SUCCESS)
         return false;
     if (ReadbackMapped == nullptr)
         return false;
@@ -11629,7 +11631,7 @@ bool VulkanRenderer3D::readbackColorTargetToCpu(bool capturePath)
             return false;
     }
 
-    if (vkWaitForFences(Device, 1, &FrameFence, VK_TRUE, UINT64_MAX) != VK_SUCCESS)
+    if (vkWaitForFences(Device, 1, &FrameFence, VK_TRUE, kFenceWaitTimeoutNs) != VK_SUCCESS)
         return false;
 
     if (vkResetFences(Device, 1, &FrameFence) != VK_SUCCESS)
@@ -11904,7 +11906,7 @@ bool VulkanRenderer3D::readbackColorTargetToCpu(bool capturePath)
         }
     }
 
-    if (vkWaitForFences(Device, 1, &FrameFence, VK_TRUE, UINT64_MAX) != VK_SUCCESS)
+    if (vkWaitForFences(Device, 1, &FrameFence, VK_TRUE, kFenceWaitTimeoutNs) != VK_SUCCESS)
         return false;
 
     if (ReadbackMapped == nullptr)
@@ -11944,7 +11946,7 @@ bool VulkanRenderer3D::readbackResultBufferToCpu()
             return false;
     }
 
-    if (vkWaitForFences(Device, 1, &FrameFence, VK_TRUE, UINT64_MAX) != VK_SUCCESS)
+    if (vkWaitForFences(Device, 1, &FrameFence, VK_TRUE, kFenceWaitTimeoutNs) != VK_SUCCESS)
         return false;
 
     if (vkResetFences(Device, 1, &FrameFence) != VK_SUCCESS)
@@ -12046,7 +12048,7 @@ bool VulkanRenderer3D::readbackResultBufferToCpu()
         }
     }
 
-    if (vkWaitForFences(Device, 1, &FrameFence, VK_TRUE, UINT64_MAX) != VK_SUCCESS)
+    if (vkWaitForFences(Device, 1, &FrameFence, VK_TRUE, kFenceWaitTimeoutNs) != VK_SUCCESS)
         return false;
 
     if (ResultReadbackMapped == nullptr)

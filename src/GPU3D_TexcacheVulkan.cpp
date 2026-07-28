@@ -10,6 +10,8 @@
 namespace melonDS
 {
 
+constexpr uint64_t kFenceWaitTimeoutNs = 2'000'000'000ull;
+
 TexcacheVulkanLoader::TexcacheVulkanLoader()
     : State(std::make_shared<SharedState>())
 {
@@ -227,7 +229,7 @@ void TexcacheVulkanLoader::WaitForPendingUploads()
         if (fenceStatus != VK_NOT_READY)
             continue;
 
-        if (vkWaitForFences(State->Device, 1, &uploadSlot.Fence, VK_TRUE, UINT64_MAX) == VK_SUCCESS)
+        if (vkWaitForFences(State->Device, 1, &uploadSlot.Fence, VK_TRUE, kFenceWaitTimeoutNs) == VK_SUCCESS)
             uploadSlot.InFlight = false;
     }
 }
@@ -360,7 +362,7 @@ TexcacheVulkanLoader::TextureHandle TexcacheVulkanLoader::GenerateTexture(u32 wi
         return 0;
     }
 
-    if (vkWaitForFences(State->Device, 1, &State->UploadFence, VK_TRUE, UINT64_MAX) != VK_SUCCESS
+    if (vkWaitForFences(State->Device, 1, &State->UploadFence, VK_TRUE, kFenceWaitTimeoutNs) != VK_SUCCESS
         || vkResetFences(State->Device, 1, &State->UploadFence) != VK_SUCCESS
         || vkResetCommandBuffer(State->CommandBuffer, 0) != VK_SUCCESS)
     {
@@ -427,7 +429,7 @@ TexcacheVulkanLoader::TextureHandle TexcacheVulkanLoader::GenerateTexture(u32 wi
         }
     }
 
-    if (vkWaitForFences(State->Device, 1, &State->UploadFence, VK_TRUE, UINT64_MAX) != VK_SUCCESS)
+    if (vkWaitForFences(State->Device, 1, &State->UploadFence, VK_TRUE, kFenceWaitTimeoutNs) != VK_SUCCESS)
     {
         DestroyTextureArray(textureArray);
         return 0;
@@ -490,7 +492,7 @@ void TexcacheVulkanLoader::UploadTexture(TextureHandle handle, u32 width, u32 he
         uploadSlotIndex = State->NextUploadSlot;
         uploadSlot = &State->UploadSlots[uploadSlotIndex];
         if (uploadSlot->Fence != VK_NULL_HANDLE
-            && vkWaitForFences(State->Device, 1, &uploadSlot->Fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS)
+            && vkWaitForFences(State->Device, 1, &uploadSlot->Fence, VK_TRUE, kFenceWaitTimeoutNs) != VK_SUCCESS)
         {
             return;
         }
