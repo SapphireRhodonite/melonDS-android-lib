@@ -96,8 +96,12 @@ public:
         return false;
     }
 
-    template <typename BeforeMutationT>
-    bool Update(GPU& gpu, BeforeMutationT&& beforeMutation, bool* invalidatedAny = nullptr)
+    template <typename BeforeMutationT, typename InvalidatedKeyT>
+    bool UpdateWithInvalidationCallback(
+        GPU& gpu,
+        BeforeMutationT&& beforeMutation,
+        bool* invalidatedAny,
+        InvalidatedKeyT&& onInvalidatedKey)
     {
         if (invalidatedAny != nullptr)
             *invalidatedAny = false;
@@ -141,6 +145,7 @@ public:
             invalidate:
                 if (invalidatedAny != nullptr)
                     *invalidatedAny = true;
+                std::forward<InvalidatedKeyT>(onInvalidatedKey)(it->first);
                 FreeTextures[entry.WidthLog2][entry.HeightLog2].push_back(entry.Texture);
 
                 //printf("invalidating texture %d\n", entry.ImageDescriptor);
@@ -152,6 +157,16 @@ public:
         }
 
         return false;
+    }
+
+    template <typename BeforeMutationT>
+    bool Update(GPU& gpu, BeforeMutationT&& beforeMutation, bool* invalidatedAny = nullptr)
+    {
+        return UpdateWithInvalidationCallback(
+            gpu,
+            std::forward<BeforeMutationT>(beforeMutation),
+            invalidatedAny,
+            [](u64) {});
     }
 
     bool Update(GPU& gpu)
@@ -253,6 +268,7 @@ public:
             case 3: ConvertNColorsTexture<outputFmt_RGB6A5, 4>(width, height, DecodingBuffer, addr, palAddr, color0Transparent, gpu); break;
             case 4: ConvertNColorsTexture<outputFmt_RGB6A5, 8>(width, height, DecodingBuffer, addr, palAddr, color0Transparent, gpu); break;
             }
+
         }
 
         for (int i = 0; i < 2; i++)

@@ -12,15 +12,38 @@ namespace melonDS
 
 constexpr uint64_t kFenceWaitTimeoutNs = 2'000'000'000ull;
 
-TexcacheVulkanLoader::TexcacheVulkanLoader()
+TexcacheVulkanLoader::TexcacheVulkanLoader(VulkanPipelineProfile pipelineProfile)
     : State(std::make_shared<SharedState>())
 {
+    State->PipelineProfile = pipelineProfile;
 }
 
 TexcacheVulkanLoader::~TexcacheVulkanLoader()
 {
     if (State != nullptr && State.use_count() == 1)
         CleanupVulkanState();
+}
+
+bool TexcacheVulkanLoader::SetPipelineProfile(VulkanPipelineProfile pipelineProfile)
+{
+    if (State == nullptr)
+        State = std::make_shared<SharedState>();
+
+    if (State->PipelineProfile == pipelineProfile)
+        return true;
+
+    if (!State->TextureArrays.empty())
+        return false;
+
+    State->PipelineProfile = pipelineProfile;
+    return true;
+}
+
+VulkanPipelineProfile TexcacheVulkanLoader::GetPipelineProfile() const noexcept
+{
+    return State != nullptr
+        ? State->PipelineProfile
+        : VulkanPipelineProfile::Compatibility;
 }
 
 bool TexcacheVulkanLoader::EnsureVulkanState()
@@ -180,6 +203,12 @@ void TexcacheVulkanLoader::DestroyTextureArray(TextureArray& textureArray)
         textureArray.ArrayView = VK_NULL_HANDLE;
     }
 
+    if (textureArray.NormalizedArrayView != VK_NULL_HANDLE)
+    {
+        vkDestroyImageView(device, textureArray.NormalizedArrayView, nullptr);
+        textureArray.NormalizedArrayView = VK_NULL_HANDLE;
+    }
+
     if (textureArray.StagingBuffer != VK_NULL_HANDLE)
     {
         vkDestroyBuffer(device, textureArray.StagingBuffer, nullptr);
@@ -247,9 +276,21 @@ TexcacheVulkanLoader::TextureHandle TexcacheVulkanLoader::GenerateTexture(u32 wi
     textureArray.Height = height;
     textureArray.Layers = layers;
     textureArray.LayerOpaque.assign(layers, 0u);
+    const bool fastPathResources = UsesVulkanFastPath(State->PipelineProfile);
+    if (fastPathResources)
+    {
+        textureArray.LayerPixels.assign(
+            static_cast<size_t>(width)
+                * static_cast<size_t>(height)
+                * static_cast<size_t>(layers),
+            0u);
+    }
 
     VkImageCreateInfo imageCreateInfo{};
     imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageCreateInfo.flags = fastPathResources
+        ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT
+        : 0u;
     imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
     imageCreateInfo.format = VK_FORMAT_R8G8B8A8_UINT;
     imageCreateInfo.extent.width = width;
@@ -306,6 +347,21 @@ TexcacheVulkanLoader::TextureHandle TexcacheVulkanLoader::GenerateTexture(u32 wi
         Platform::Log(Platform::LogLevel::Error, "TexcacheVulkan: failed to create array view");
         DestroyTextureArray(textureArray);
         return 0;
+    }
+
+    if (fastPathResources)
+    {
+        arrayViewCreateInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+        if (vkCreateImageView(
+                State->Device,
+                &arrayViewCreateInfo,
+                nullptr,
+                &textureArray.NormalizedArrayView) != VK_SUCCESS)
+        {
+            Platform::Log(Platform::LogLevel::Error, "TexcacheVulkan: failed to create normalized array view");
+            DestroyTextureArray(textureArray);
+            return 0;
+        }
     }
 
     VkSamplerCreateInfo samplerCreateInfo{};
@@ -461,6 +517,17 @@ void TexcacheVulkanLoader::UploadTexture(TextureHandle handle, u32 width, u32 he
     const size_t layerPixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
     bool layerOpaque = true;
     const u32* sourcePixels = static_cast<const u32*>(data);
+    if (!textureArray.LayerPixels.empty())
+    {
+        const size_t layerPixelOffset = static_cast<size_t>(layer) * layerPixelCount;
+        if (layerPixelOffset + layerPixelCount <= textureArray.LayerPixels.size())
+        {
+            std::memcpy(
+                &textureArray.LayerPixels[layerPixelOffset],
+                sourcePixels,
+                layerPixelCount * sizeof(u32));
+        }
+    }
     for (size_t pixel = 0; pixel < layerPixelCount; pixel++)
     {
         if (((sourcePixels[pixel] >> 24u) & 0x1Fu) != 0x1Fu)
@@ -641,7 +708,6 @@ void TexcacheVulkanLoader::UploadTexture(TextureHandle handle, u32 width, u32 he
         1,
         &copyRegion
     );
-
     VkImageMemoryBarrier backToGeneralBarrier{};
     backToGeneralBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     backToGeneralBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -720,6 +786,25 @@ bool TexcacheVulkanLoader::GetTextureDescriptor(TextureHandle handle, VkDescript
     return true;
 }
 
+bool TexcacheVulkanLoader::GetTextureNormalizedDescriptor(TextureHandle handle, VkDescriptorImageInfo* outImageInfo) const
+{
+    if (State == nullptr || outImageInfo == nullptr)
+        return false;
+
+    auto it = State->TextureArrays.find(handle);
+    if (it == State->TextureArrays.end())
+        return false;
+
+    TextureArray& textureArray = it->second;
+    if (textureArray.NormalizedArrayView == VK_NULL_HANDLE || textureArray.Sampler == VK_NULL_HANDLE)
+        return false;
+
+    outImageInfo->sampler = textureArray.Sampler;
+    outImageInfo->imageView = textureArray.NormalizedArrayView;
+    outImageInfo->imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    return true;
+}
+
 bool TexcacheVulkanLoader::IsTextureLayerOpaque(TextureHandle handle, u32 layer) const
 {
     if (State == nullptr)
@@ -734,6 +819,30 @@ bool TexcacheVulkanLoader::IsTextureLayerOpaque(TextureHandle handle, u32 layer)
         return false;
 
     return textureArray.LayerOpaque[layer] != 0u;
+}
+
+bool TexcacheVulkanLoader::ReadTextureLayerTexel(TextureHandle handle, u32 layer, u32 x, u32 y, u32* outTexel) const
+{
+    if (State == nullptr || outTexel == nullptr)
+        return false;
+
+    auto it = State->TextureArrays.find(handle);
+    if (it == State->TextureArrays.end())
+        return false;
+
+    const TextureArray& textureArray = it->second;
+    if (layer >= textureArray.Layers || x >= textureArray.Width || y >= textureArray.Height)
+        return false;
+
+    const size_t pixelIndex =
+        (static_cast<size_t>(layer) * static_cast<size_t>(textureArray.Width) * static_cast<size_t>(textureArray.Height))
+        + (static_cast<size_t>(y) * static_cast<size_t>(textureArray.Width))
+        + static_cast<size_t>(x);
+    if (pixelIndex >= textureArray.LayerPixels.size())
+        return false;
+
+    *outTexel = textureArray.LayerPixels[pixelIndex];
+    return true;
 }
 
 }

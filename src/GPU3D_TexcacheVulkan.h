@@ -8,6 +8,7 @@
 #include <vulkan/vulkan.h>
 
 #include "GPU3D_Texcache.h"
+#include "VulkanPipelineProfile.h"
 
 namespace melonDS
 {
@@ -17,14 +18,20 @@ class TexcacheVulkanLoader
 public:
     using TextureHandle = u64;
 
-    TexcacheVulkanLoader();
+    explicit TexcacheVulkanLoader(
+        VulkanPipelineProfile pipelineProfile = VulkanPipelineProfile::Compatibility);
     ~TexcacheVulkanLoader();
+
+    bool SetPipelineProfile(VulkanPipelineProfile pipelineProfile);
+    [[nodiscard]] VulkanPipelineProfile GetPipelineProfile() const noexcept;
 
     TextureHandle GenerateTexture(u32 width, u32 height, u32 layers);
     void UploadTexture(TextureHandle handle, u32 width, u32 height, u32 layer, void* data);
     void DeleteTexture(TextureHandle handle);
     bool GetTextureDescriptor(TextureHandle handle, VkDescriptorImageInfo* outImageInfo) const;
+    bool GetTextureNormalizedDescriptor(TextureHandle handle, VkDescriptorImageInfo* outImageInfo) const;
     bool IsTextureLayerOpaque(TextureHandle handle, u32 layer) const;
+    bool ReadTextureLayerTexel(TextureHandle handle, u32 layer, u32 x, u32 y, u32* outTexel) const;
 
 private:
     struct TextureArray
@@ -36,12 +43,14 @@ private:
         VkImage Image = VK_NULL_HANDLE;
         VkDeviceMemory Memory = VK_NULL_HANDLE;
         VkImageView ArrayView = VK_NULL_HANDLE;
+        VkImageView NormalizedArrayView = VK_NULL_HANDLE;
         VkSampler Sampler = VK_NULL_HANDLE;
 
         VkBuffer StagingBuffer = VK_NULL_HANDLE;
         VkDeviceMemory StagingMemory = VK_NULL_HANDLE;
         VkDeviceSize StagingSize = 0;
         std::vector<u8> LayerOpaque;
+        std::vector<u32> LayerPixels;
     };
 
     struct SharedState
@@ -59,6 +68,7 @@ private:
         static constexpr size_t UploadSlotCount = 8;
 
         TextureHandle NextHandle = 1;
+        VulkanPipelineProfile PipelineProfile = VulkanPipelineProfile::Compatibility;
         std::unordered_map<TextureHandle, TextureArray> TextureArrays;
         std::array<UploadSlot, UploadSlotCount> UploadSlots{};
         size_t NextUploadSlot = 0;
