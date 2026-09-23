@@ -24,7 +24,6 @@
 
 #include "Savestate.h"
 #include "FIFO.h"
-#include "VulkanPipelineProfile.h"
 
 namespace melonDS
 {
@@ -89,10 +88,19 @@ class NDS;
 struct CaptureSourceIdentity
 {
     bool Valid = false;
+
+    u64 RenderProductEpoch = 0;
     u64 Sequence = 0;
     u32 PolygonCount = 0;
     u32 CaptureCnt = 0;
     bool ScreenSwap = false;
+};
+
+struct LiveRenderProductIdentity
+{
+    u64 Epoch = 0;
+    u64 Sequence = 0;
+    bool Valid = false;
 };
 
 class GPU3D
@@ -123,6 +131,8 @@ public:
     void SetRenderXPos(u16 xpos) noexcept;
     [[nodiscard]] u16 GetRenderXPos() const noexcept { return RenderXPos; }
     u32* GetLine(int line) noexcept;
+    [[nodiscard]] bool GetLiveRenderProductIdentity(
+        LiveRenderProductIdentity& outIdentity) const noexcept;
     [[nodiscard]] bool GetLastServedCaptureSourceIdentity(
         CaptureSourceIdentity& outIdentity) const noexcept;
 
@@ -361,6 +371,8 @@ public:
     virtual void VCount144(GPU& gpu) {};
     virtual void Stop(const GPU& gpu) {}
     virtual void RenderFrame(GPU& gpu) = 0;
+
+    [[nodiscard]] virtual bool FrameskipPlaceholderServido() const noexcept { return false; }
     virtual void RestartFrame(GPU& gpu) {};
     virtual u32* GetLine(int line) = 0;
     virtual void Blit(const GPU& gpu) {};
@@ -374,17 +386,23 @@ public:
         (void)captureCnt;
         (void)displayCnt;
     }
+
+    virtual void SetFaithfulComposeActiveHint(bool active) { (void)active; }
+
+    virtual void InvalidateRenderProductIdentities() noexcept {}
     [[nodiscard]] virtual bool GetLastServedCaptureSourceIdentity(
         CaptureSourceIdentity& outIdentity) const noexcept
     {
         outIdentity = {};
         return false;
     }
-    [[nodiscard]] virtual bool UsesStructured2DMetadata() const noexcept { return false; }
-    [[nodiscard]] virtual VulkanPipelineProfile GetVulkanPipelineProfile() const noexcept
+    [[nodiscard]] virtual bool GetLiveRenderProductIdentity(
+        LiveRenderProductIdentity& outIdentity) const noexcept
     {
-        return VulkanPipelineProfile::Compatibility;
+        outIdentity = {};
+        return false;
     }
+    [[nodiscard]] virtual bool UsesStructured2DMetadata() const noexcept { return false; }
     virtual void SetOutputTexture(int buffer, u32 texture) {}
     virtual void BindOutputTexture(int buffer) {}
 

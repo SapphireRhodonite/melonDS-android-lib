@@ -92,15 +92,20 @@ float calculateFogDensity(float depth)
 
     float density0 = unpackFogDensity(uint(densityid));
     float density1 = unpackFogDensity(uint(densityid + 1));
-    return mix(density0, density1, float(densityfrac) / 131072.0) * (1.0 / 128.0);
+    float density = mix(density0, density1, float(densityfrac) / 131072.0);
+
+    if (density >= 127.0)
+        density = 128.0;
+    return density * (1.0 / 128.0);
 }
 
 vec3 unpackFogColor()
 {
+
     return vec3(
-        float(pc.fogColor & 0x1Fu),
-        float((pc.fogColor >> 5u) & 0x1Fu),
-        float((pc.fogColor >> 10u) & 0x1Fu)) * (1.0 / 31.0);
+        float((pc.fogColor & 0x1Fu) << 1u),
+        float(((pc.fogColor >> 5u) & 0x1Fu) << 1u),
+        float(((pc.fogColor >> 10u) & 0x1Fu) << 1u)) * (1.0 / 63.0);
 }
 
 void main()

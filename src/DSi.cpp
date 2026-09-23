@@ -1605,6 +1605,8 @@ void DSi::ARM9Write8(u32 addr, u8 val)
 
     case 0x0C000000:
         JIT.CheckAndInvalidate<0, ARMJIT_Memory::memregion_MainRAM>(addr);
+        GPU.InvalidateFaithfulMainRamCaptureRangeForCpuAddress(
+            0u, addr, sizeof(val));
         *(u8*)&MainRAM[addr & MainRAMMask] = val;
         return;
     }
@@ -1690,6 +1692,8 @@ void DSi::ARM9Write16(u32 addr, u16 val)
 
     case 0x0C000000:
         JIT.CheckAndInvalidate<0, ARMJIT_Memory::memregion_MainRAM>(addr);
+        GPU.InvalidateFaithfulMainRamCaptureRangeForCpuAddress(
+            0u, addr, sizeof(val));
         *(u16*)&MainRAM[addr & MainRAMMask] = val;
         return;
     }
@@ -1775,6 +1779,8 @@ void DSi::ARM9Write32(u32 addr, u32 val)
 
     case 0x0C000000:
         JIT.CheckAndInvalidate<0, ARMJIT_Memory::memregion_MainRAM>(addr);
+        GPU.InvalidateFaithfulMainRamCaptureRangeForCpuAddress(
+            0u, addr, sizeof(val));
         *(u32*)&MainRAM[addr & MainRAMMask] = val;
         return;
     }
@@ -2078,6 +2084,8 @@ void DSi::ARM7Write8(u32 addr, u8 val)
     case 0x0C000000:
     case 0x0C800000:
         JIT.CheckAndInvalidate<1, ARMJIT_Memory::memregion_MainRAM>(addr);
+        GPU.InvalidateFaithfulMainRamCaptureRangeForCpuAddress(
+            1u, addr, sizeof(val));
         *(u8*)&NDS::MainRAM[addr & NDS::MainRAMMask] = val;
         return;
     }
@@ -2168,6 +2176,8 @@ void DSi::ARM7Write16(u32 addr, u16 val)
     case 0x0C000000:
     case 0x0C800000:
         JIT.CheckAndInvalidate<1, ARMJIT_Memory::memregion_MainRAM>(addr);
+        GPU.InvalidateFaithfulMainRamCaptureRangeForCpuAddress(
+            1u, addr, sizeof(val));
         *(u16*)&NDS::MainRAM[addr & NDS::MainRAMMask] = val;
         return;
     }
@@ -2258,6 +2268,8 @@ void DSi::ARM7Write32(u32 addr, u32 val)
     case 0x0C000000:
     case 0x0C800000:
         JIT.CheckAndInvalidate<1, ARMJIT_Memory::memregion_MainRAM>(addr);
+        GPU.InvalidateFaithfulMainRamCaptureRangeForCpuAddress(
+            1u, addr, sizeof(val));
         *(u32*)&NDS::MainRAM[addr & NDS::MainRAMMask] = val;
         return;
     }

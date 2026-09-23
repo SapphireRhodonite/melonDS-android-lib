@@ -1,5 +1,7 @@
 #include "VulkanDispatch.h"
 
+#include <array>
+#include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
 #include <mutex>
@@ -314,6 +316,17 @@ void loadGlobalSymbols()
     loadGlobal(vkWaitSemaphoresKHR, "vkWaitSemaphoresKHR");
 }
 
+void unloadDriver()
+{
+    if (gVulkanHandle != nullptr)
+        dlclose(gVulkanHandle);
+    gVulkanHandle = nullptr;
+    gInitialized = false;
+    gUsingCustomDriver = false;
+    vkGetInstanceProcAddr = nullptr;
+    loadGlobalSymbols();
+}
+
 void loadInstanceSymbols(VkInstance instance)
 {
     loadInstance(instance, vkAcquireNextImageKHR, "vkAcquireNextImageKHR");
@@ -441,6 +454,7 @@ void loadInstanceSymbols(VkInstance instance)
 
 void loadDeviceSymbols(VkDevice device)
 {
+
     if (vkGetDeviceProcAddr != nullptr) {
         auto resolved = reinterpret_cast<PFN_vkAcquireNextImageKHR>(vkGetDeviceProcAddr(device, "vkAcquireNextImageKHR"));
         if (resolved != nullptr)
@@ -612,11 +626,6 @@ void loadDeviceSymbols(VkDevice device)
             vkCmdWriteTimestamp = resolved;
     }
     if (vkGetDeviceProcAddr != nullptr) {
-        auto resolved = reinterpret_cast<PFN_vkCreateAndroidSurfaceKHR>(vkGetDeviceProcAddr(device, "vkCreateAndroidSurfaceKHR"));
-        if (resolved != nullptr)
-            vkCreateAndroidSurfaceKHR = resolved;
-    }
-    if (vkGetDeviceProcAddr != nullptr) {
         auto resolved = reinterpret_cast<PFN_vkCreateBuffer>(vkGetDeviceProcAddr(device, "vkCreateBuffer"));
         if (resolved != nullptr)
             vkCreateBuffer = resolved;
@@ -632,11 +641,6 @@ void loadDeviceSymbols(VkDevice device)
             vkCreateComputePipelines = resolved;
     }
     if (vkGetDeviceProcAddr != nullptr) {
-        auto resolved = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(vkGetDeviceProcAddr(device, "vkCreateDebugUtilsMessengerEXT"));
-        if (resolved != nullptr)
-            vkCreateDebugUtilsMessengerEXT = resolved;
-    }
-    if (vkGetDeviceProcAddr != nullptr) {
         auto resolved = reinterpret_cast<PFN_vkCreateDescriptorPool>(vkGetDeviceProcAddr(device, "vkCreateDescriptorPool"));
         if (resolved != nullptr)
             vkCreateDescriptorPool = resolved;
@@ -645,11 +649,6 @@ void loadDeviceSymbols(VkDevice device)
         auto resolved = reinterpret_cast<PFN_vkCreateDescriptorSetLayout>(vkGetDeviceProcAddr(device, "vkCreateDescriptorSetLayout"));
         if (resolved != nullptr)
             vkCreateDescriptorSetLayout = resolved;
-    }
-    if (vkGetDeviceProcAddr != nullptr) {
-        auto resolved = reinterpret_cast<PFN_vkCreateDevice>(vkGetDeviceProcAddr(device, "vkCreateDevice"));
-        if (resolved != nullptr)
-            vkCreateDevice = resolved;
     }
     if (vkGetDeviceProcAddr != nullptr) {
         auto resolved = reinterpret_cast<PFN_vkCreateFence>(vkGetDeviceProcAddr(device, "vkCreateFence"));
@@ -675,11 +674,6 @@ void loadDeviceSymbols(VkDevice device)
         auto resolved = reinterpret_cast<PFN_vkCreateImageView>(vkGetDeviceProcAddr(device, "vkCreateImageView"));
         if (resolved != nullptr)
             vkCreateImageView = resolved;
-    }
-    if (vkGetDeviceProcAddr != nullptr) {
-        auto resolved = reinterpret_cast<PFN_vkCreateInstance>(vkGetDeviceProcAddr(device, "vkCreateInstance"));
-        if (resolved != nullptr)
-            vkCreateInstance = resolved;
     }
     if (vkGetDeviceProcAddr != nullptr) {
         auto resolved = reinterpret_cast<PFN_vkCreatePipelineCache>(vkGetDeviceProcAddr(device, "vkCreatePipelineCache"));
@@ -732,11 +726,6 @@ void loadDeviceSymbols(VkDevice device)
             vkDestroyCommandPool = resolved;
     }
     if (vkGetDeviceProcAddr != nullptr) {
-        auto resolved = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(vkGetDeviceProcAddr(device, "vkDestroyDebugUtilsMessengerEXT"));
-        if (resolved != nullptr)
-            vkDestroyDebugUtilsMessengerEXT = resolved;
-    }
-    if (vkGetDeviceProcAddr != nullptr) {
         auto resolved = reinterpret_cast<PFN_vkDestroyDescriptorPool>(vkGetDeviceProcAddr(device, "vkDestroyDescriptorPool"));
         if (resolved != nullptr)
             vkDestroyDescriptorPool = resolved;
@@ -770,11 +759,6 @@ void loadDeviceSymbols(VkDevice device)
         auto resolved = reinterpret_cast<PFN_vkDestroyImageView>(vkGetDeviceProcAddr(device, "vkDestroyImageView"));
         if (resolved != nullptr)
             vkDestroyImageView = resolved;
-    }
-    if (vkGetDeviceProcAddr != nullptr) {
-        auto resolved = reinterpret_cast<PFN_vkDestroyInstance>(vkGetDeviceProcAddr(device, "vkDestroyInstance"));
-        if (resolved != nullptr)
-            vkDestroyInstance = resolved;
     }
     if (vkGetDeviceProcAddr != nullptr) {
         auto resolved = reinterpret_cast<PFN_vkDestroyPipeline>(vkGetDeviceProcAddr(device, "vkDestroyPipeline"));
@@ -817,11 +801,6 @@ void loadDeviceSymbols(VkDevice device)
             vkDestroyShaderModule = resolved;
     }
     if (vkGetDeviceProcAddr != nullptr) {
-        auto resolved = reinterpret_cast<PFN_vkDestroySurfaceKHR>(vkGetDeviceProcAddr(device, "vkDestroySurfaceKHR"));
-        if (resolved != nullptr)
-            vkDestroySurfaceKHR = resolved;
-    }
-    if (vkGetDeviceProcAddr != nullptr) {
         auto resolved = reinterpret_cast<PFN_vkDestroySwapchainKHR>(vkGetDeviceProcAddr(device, "vkDestroySwapchainKHR"));
         if (resolved != nullptr)
             vkDestroySwapchainKHR = resolved;
@@ -835,26 +814,6 @@ void loadDeviceSymbols(VkDevice device)
         auto resolved = reinterpret_cast<PFN_vkEndCommandBuffer>(vkGetDeviceProcAddr(device, "vkEndCommandBuffer"));
         if (resolved != nullptr)
             vkEndCommandBuffer = resolved;
-    }
-    if (vkGetDeviceProcAddr != nullptr) {
-        auto resolved = reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(vkGetDeviceProcAddr(device, "vkEnumerateDeviceExtensionProperties"));
-        if (resolved != nullptr)
-            vkEnumerateDeviceExtensionProperties = resolved;
-    }
-    if (vkGetDeviceProcAddr != nullptr) {
-        auto resolved = reinterpret_cast<PFN_vkEnumerateInstanceExtensionProperties>(vkGetDeviceProcAddr(device, "vkEnumerateInstanceExtensionProperties"));
-        if (resolved != nullptr)
-            vkEnumerateInstanceExtensionProperties = resolved;
-    }
-    if (vkGetDeviceProcAddr != nullptr) {
-        auto resolved = reinterpret_cast<PFN_vkEnumerateInstanceLayerProperties>(vkGetDeviceProcAddr(device, "vkEnumerateInstanceLayerProperties"));
-        if (resolved != nullptr)
-            vkEnumerateInstanceLayerProperties = resolved;
-    }
-    if (vkGetDeviceProcAddr != nullptr) {
-        auto resolved = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(vkGetDeviceProcAddr(device, "vkEnumeratePhysicalDevices"));
-        if (resolved != nullptr)
-            vkEnumeratePhysicalDevices = resolved;
     }
     if (vkGetDeviceProcAddr != nullptr) {
         auto resolved = reinterpret_cast<PFN_vkFreeCommandBuffers>(vkGetDeviceProcAddr(device, "vkFreeCommandBuffers"));
@@ -895,61 +854,6 @@ void loadDeviceSymbols(VkDevice device)
         auto resolved = reinterpret_cast<PFN_vkGetImageMemoryRequirements>(vkGetDeviceProcAddr(device, "vkGetImageMemoryRequirements"));
         if (resolved != nullptr)
             vkGetImageMemoryRequirements = resolved;
-    }
-    if (vkGetDeviceProcAddr != nullptr) {
-        auto resolved = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures>(vkGetDeviceProcAddr(device, "vkGetPhysicalDeviceFeatures"));
-        if (resolved != nullptr)
-            vkGetPhysicalDeviceFeatures = resolved;
-    }
-    if (vkGetDeviceProcAddr != nullptr) {
-        auto resolved = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(vkGetDeviceProcAddr(device, "vkGetPhysicalDeviceFeatures2"));
-        if (resolved != nullptr)
-            vkGetPhysicalDeviceFeatures2 = resolved;
-    }
-    if (vkGetDeviceProcAddr != nullptr) {
-        auto resolved = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2KHR>(vkGetDeviceProcAddr(device, "vkGetPhysicalDeviceFeatures2KHR"));
-        if (resolved != nullptr)
-            vkGetPhysicalDeviceFeatures2KHR = resolved;
-    }
-    if (vkGetDeviceProcAddr != nullptr) {
-        auto resolved = reinterpret_cast<PFN_vkGetPhysicalDeviceFormatProperties>(vkGetDeviceProcAddr(device, "vkGetPhysicalDeviceFormatProperties"));
-        if (resolved != nullptr)
-            vkGetPhysicalDeviceFormatProperties = resolved;
-    }
-    if (vkGetDeviceProcAddr != nullptr) {
-        auto resolved = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(vkGetDeviceProcAddr(device, "vkGetPhysicalDeviceMemoryProperties"));
-        if (resolved != nullptr)
-            vkGetPhysicalDeviceMemoryProperties = resolved;
-    }
-    if (vkGetDeviceProcAddr != nullptr) {
-        auto resolved = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(vkGetDeviceProcAddr(device, "vkGetPhysicalDeviceProperties"));
-        if (resolved != nullptr)
-            vkGetPhysicalDeviceProperties = resolved;
-    }
-    if (vkGetDeviceProcAddr != nullptr) {
-        auto resolved = reinterpret_cast<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(vkGetDeviceProcAddr(device, "vkGetPhysicalDeviceQueueFamilyProperties"));
-        if (resolved != nullptr)
-            vkGetPhysicalDeviceQueueFamilyProperties = resolved;
-    }
-    if (vkGetDeviceProcAddr != nullptr) {
-        auto resolved = reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR>(vkGetDeviceProcAddr(device, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR"));
-        if (resolved != nullptr)
-            vkGetPhysicalDeviceSurfaceCapabilitiesKHR = resolved;
-    }
-    if (vkGetDeviceProcAddr != nullptr) {
-        auto resolved = reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceFormatsKHR>(vkGetDeviceProcAddr(device, "vkGetPhysicalDeviceSurfaceFormatsKHR"));
-        if (resolved != nullptr)
-            vkGetPhysicalDeviceSurfaceFormatsKHR = resolved;
-    }
-    if (vkGetDeviceProcAddr != nullptr) {
-        auto resolved = reinterpret_cast<PFN_vkGetPhysicalDeviceSurfacePresentModesKHR>(vkGetDeviceProcAddr(device, "vkGetPhysicalDeviceSurfacePresentModesKHR"));
-        if (resolved != nullptr)
-            vkGetPhysicalDeviceSurfacePresentModesKHR = resolved;
-    }
-    if (vkGetDeviceProcAddr != nullptr) {
-        auto resolved = reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceSupportKHR>(vkGetDeviceProcAddr(device, "vkGetPhysicalDeviceSurfaceSupportKHR"));
-        if (resolved != nullptr)
-            vkGetPhysicalDeviceSurfaceSupportKHR = resolved;
     }
     if (vkGetDeviceProcAddr != nullptr) {
         auto resolved = reinterpret_cast<PFN_vkGetPipelineCacheData>(vkGetDeviceProcAddr(device, "vkGetPipelineCacheData"));
@@ -1050,13 +954,7 @@ void ConfigureDriver(const DriverConfiguration& configuration)
     std::scoped_lock guard(gLock);
     if (gInitialized && !sameConfiguration(gConfiguration, configuration))
     {
-        if (gVulkanHandle != nullptr)
-            dlclose(gVulkanHandle);
-        gVulkanHandle = nullptr;
-        gInitialized = false;
-        gUsingCustomDriver = false;
-        vkGetInstanceProcAddr = nullptr;
-        vkGetDeviceProcAddr = nullptr;
+        unloadDriver();
         Platform::Log(
             Platform::LogLevel::Warn,
             "VulkanDriver: configuration changed; Vulkan loader will reopen on next use"
@@ -1119,12 +1017,56 @@ bool Initialize()
     }
 #endif
 
+    const char* systemDriverLibrary = nullptr;
     if (gVulkanHandle == nullptr)
     {
-        gVulkanHandle = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+        const char* configuredLibrary = std::getenv("MELON_VULKAN_LIBRARY");
+        if (configuredLibrary != nullptr && configuredLibrary[0] != '\0')
+        {
+            dlerror();
+            gVulkanHandle = dlopen(configuredLibrary, RTLD_NOW | RTLD_LOCAL);
+            if (gVulkanHandle == nullptr)
+            {
+                const char* error = dlerror();
+                Platform::Log(
+                    Platform::LogLevel::Error,
+                    "VulkanDriver: requested loader failed library=%s error=%s",
+                    configuredLibrary,
+                    error != nullptr ? error : "unknown"
+                );
+                return false;
+            }
+            systemDriverLibrary = configuredLibrary;
+        }
+
+#if defined(__APPLE__)
+        constexpr std::array<const char*, 2> defaultSystemLibraries = {
+            "libvulkan.dylib",
+            "libMoltenVK.dylib",
+        };
+#else
+        constexpr std::array<const char*, 1> defaultSystemLibraries = {
+            "libvulkan.so",
+        };
+#endif
+        for (const char* library : defaultSystemLibraries)
+        {
+            if (gVulkanHandle != nullptr)
+                break;
+            gVulkanHandle = dlopen(library, RTLD_NOW | RTLD_LOCAL);
+            if (gVulkanHandle != nullptr)
+                systemDriverLibrary = library;
+        }
+
         gUsingCustomDriver = false;
         if (gVulkanHandle != nullptr)
-            Platform::Log(Platform::LogLevel::Warn, "VulkanDriver: source=system");
+        {
+            Platform::Log(
+                Platform::LogLevel::Warn,
+                "VulkanDriver: source=system library=%s",
+                systemDriverLibrary != nullptr ? systemDriverLibrary : "unknown"
+            );
+        }
     }
 
     if (gVulkanHandle == nullptr)
@@ -1132,7 +1074,7 @@ bool Initialize()
         const char* error = dlerror();
         Platform::Log(
             Platform::LogLevel::Error,
-            "VulkanDriver: failed to open libvulkan.so error=%s",
+            "VulkanDriver: failed to open the Vulkan loader error=%s",
             error != nullptr ? error : "unknown"
         );
         return false;
@@ -1142,10 +1084,23 @@ bool Initialize()
     if (vkGetInstanceProcAddr == nullptr)
     {
         Platform::Log(Platform::LogLevel::Error, "VulkanDriver: vkGetInstanceProcAddr not found");
+        unloadDriver();
         return false;
     }
 
     loadGlobalSymbols();
+    if (vkCreateInstance == nullptr ||
+        vkEnumerateInstanceExtensionProperties == nullptr ||
+        vkEnumerateInstanceLayerProperties == nullptr)
+    {
+        Platform::Log(
+            Platform::LogLevel::Error,
+            "VulkanDriver: required global entry points are unavailable"
+        );
+        unloadDriver();
+        return false;
+    }
+
     gInitialized = true;
     Platform::Log(
         Platform::LogLevel::Warn,

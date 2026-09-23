@@ -398,7 +398,8 @@ bool ARMJIT_Memory::UnmapFromRange(u32 addr, u32 num, u32 offset, u32 size) noex
 }
 
 #ifndef __SWITCH__
-void ARMJIT_Memory::SetCodeProtectionRange(u32 addr, u32 size, u32 num, int protection) noexcept
+bool ARMJIT_Memory::SetCodeProtectionRange(
+    u32 addr, u32 size, u32 num, int protection) noexcept
 {
     CHECK_ALIGNED(addr);
     CHECK_ALIGNED(size);
@@ -413,11 +414,17 @@ void ARMJIT_Memory::SetCodeProtectionRange(u32 addr, u32 size, u32 num, int prot
     else
         winProtection = PAGE_READWRITE;
     bool success = VirtualProtect(dst, size, winProtection, &oldProtection);
+    if (!success && protection == 1)
+    {
+
+        success = VirtualProtect(
+            dst, size, PAGE_NOACCESS, &oldProtection);
+    }
     if (!success)
     {
         Log(LogLevel::Debug, "VirtualProtect failed with %x\n", GetLastError());
     }
-    assert(success);
+    return success;
 #else
     int posixProt;
     if (protection == 0)
@@ -426,7 +433,19 @@ void ARMJIT_Memory::SetCodeProtectionRange(u32 addr, u32 size, u32 num, int prot
         posixProt = PROT_READ;
     else
         posixProt = PROT_READ | PROT_WRITE;
-    mprotect(dst, size, posixProt);
+    if (mprotect(dst, size, posixProt) == 0)
+        return true;
+    const int firstError = errno;
+    if (protection == 1 && mprotect(dst, size, PROT_NONE) == 0)
+    {
+
+        Log(LogLevel::Warn,
+            "mprotect(PROT_READ) failed (%s); using PROT_NONE",
+            strerror(firstError));
+        return true;
+    }
+    Log(LogLevel::Error, "mprotect failed (%s)", strerror(firstError));
+    return false;
 #endif
 }
 #endif
@@ -508,29 +527,139 @@ void ARMJIT_Memory::SetCodeProtection(int region, u32 offset, bool protect) noex
         if (offset < mapping.LocalOffset || offset >= mapping.LocalOffset + mapping.Size)
             continue;
 
-        u32 effectiveAddr = mapping.Addr + (offset - mapping.LocalOffset);
-        if (mapping.Num == 0
-            && region != memregion_DTCM
-            && (effectiveAddr & NDS.ARM9.DTCMMask) == NDS.ARM9.DTCMBase)
-            continue;
+        const bool effectiveProtect = protect
+            || (region == memregion_MainRAM && MainRAMHostPageHasLineage(offset));
+        const bool changed = SetMappedPageProtection(
+            region, mapping, offset, effectiveProtect);
+        if (!changed && effectiveProtect)
+        {
 
-        u8* states = (u8*)(mapping.Num == 0 ? MappingStatus9 : MappingStatus7);
+            Log(LogLevel::Error,
+                "failed to protect fastmem page region=%d offset=%08X",
+                region, offset);
+            std::abort();
+        }
 
-        //printf("%x %d %x %x %x %d\n", effectiveAddr, mapping.Num, mapping.Addr, mapping.LocalOffset, mapping.Size, states[effectiveAddr >> PageShift]);
-        assert(states[effectiveAddr >> PageShift] == (protect ? memstate_MappedRW : memstate_MappedProtected));
-        states[effectiveAddr >> PageShift] = protect ? memstate_MappedProtected : memstate_MappedRW;
+    }
+}
+
+bool ARMJIT_Memory::MainRAMHostPageHasLineage(u32 physicalOffset) const noexcept
+{
+    if (PageSize == 0 || physicalOffset >= MainRAMMaxSize)
+        return false;
+
+    return MainRAMLineageHostPageRefs[physicalOffset / PageSize] != 0;
+}
+
+bool ARMJIT_Memory::SetMappedPageProtection(
+    int region, Mapping& mapping, u32 physicalOffset, bool protect) noexcept
+{
+    u32 effectiveAddr = mapping.Addr + (physicalOffset - mapping.LocalOffset);
+    if (mapping.Num == 0
+        && region != memregion_DTCM
+        && (effectiveAddr & NDS.ARM9.DTCMMask) == NDS.ARM9.DTCMBase)
+        return true;
+
+    u8* states = mapping.Num == 0 ? MappingStatus9 : MappingStatus7;
+    const u8 desiredState = protect ? memstate_MappedProtected : memstate_MappedRW;
+    u8& state = states[effectiveAddr >> PageShift];
+    assert(state != memstate_Unmapped);
+    if (state == desiredState)
+    {
+
+        assert(region == memregion_MainRAM);
+        return true;
+    }
 
 #if defined(__SWITCH__)
-        bool success;
-        if (protect)
-            success = UnmapFromRange(effectiveAddr, mapping.Num, OffsetsPerRegion[region] + offset, 0x1000);
-        else
-            success = MapIntoRange(effectiveAddr, mapping.Num, OffsetsPerRegion[region] + offset, 0x1000);
-        assert(success);
+    bool success;
+    if (protect)
+        success = UnmapFromRange(
+            effectiveAddr, mapping.Num, OffsetsPerRegion[region] + physicalOffset, PageSize);
+    else
+        success = MapIntoRange(
+            effectiveAddr, mapping.Num, OffsetsPerRegion[region] + physicalOffset, PageSize);
 #else
-        SetCodeProtectionRange(effectiveAddr, PageSize, mapping.Num, protect ? 1 : 2);
+    const bool success = SetCodeProtectionRange(
+        effectiveAddr, PageSize, mapping.Num, protect ? 1 : 2);
 #endif
+    if (!success)
+        return false;
+
+    state = desiredState;
+    return true;
+}
+
+bool ARMJIT_Memory::RefreshMainRAMHostPageProtection(
+    u32 physicalOffset) noexcept
+{
+    assert(PageSize != 0);
+    assert((physicalOffset & (PageSize - 1)) == 0);
+    assert(physicalOffset < MainRAMMaxSize);
+
+    AddressRange* codeRange = NDS.JIT.CodeMemRegions[memregion_MainRAM] + physicalOffset / 512;
+    const bool protect = PageContainsCode(codeRange, PageSize)
+        || MainRAMHostPageHasLineage(physicalOffset);
+
+    bool success = true;
+    for (int i = 0; i < Mappings[memregion_MainRAM].Length; i++)
+    {
+        Mapping& mapping = Mappings[memregion_MainRAM][i];
+        if (physicalOffset < mapping.LocalOffset
+            || physicalOffset >= mapping.LocalOffset + mapping.Size)
+            continue;
+
+        success = SetMappedPageProtection(
+            memregion_MainRAM, mapping, physicalOffset, protect) && success;
     }
+    return success;
+}
+
+bool ARMJIT_Memory::NotifyMainRAMLineagePageTransition(
+    u32 physicalPageOffset, bool hasLineage) noexcept
+{
+    assert((physicalPageOffset & (RegularPageSize - 1)) == 0);
+    assert(physicalPageOffset < MainRAMMaxSize);
+    if ((physicalPageOffset & (RegularPageSize - 1)) != 0
+        || physicalPageOffset >= MainRAMMaxSize)
+        return false;
+
+    if (!IsFastMemSupported())
+        return true;
+
+    const u32 hostPageOffset = physicalPageOffset & ~(PageSize - 1);
+    u8& refs = MainRAMLineageHostPageRefs[hostPageOffset / PageSize];
+    const bool wasProtectedByLineage = refs != 0;
+    if (hasLineage)
+    {
+        assert(refs < PageSize / RegularPageSize);
+        if (refs >= PageSize / RegularPageSize)
+            return false;
+        refs++;
+    }
+    else
+    {
+        assert(refs > 0);
+        if (refs == 0)
+            return false;
+        refs--;
+    }
+
+    if (wasProtectedByLineage != (refs != 0))
+    {
+        const bool protectedAllAliases =
+            RefreshMainRAMHostPageProtection(hostPageOffset);
+        if (!protectedAllAliases && hasLineage)
+        {
+
+            assert(refs > 0u);
+            refs--;
+            (void)RefreshMainRAMHostPageProtection(hostPageOffset);
+            return false;
+        }
+
+    }
+    return true;
 }
 
 void ARMJIT_Memory::RemapDTCM(u32 newBase, u32 newSize) noexcept
@@ -661,6 +790,7 @@ bool ARMJIT_Memory::MapAtAddress(u32 addr) noexcept
     u32 dtcmStart = NDS.ARM9.DTCMBase;
     u32 dtcmSize = ~NDS.ARM9.DTCMMask + 1;
     u32 dtcmEnd = dtcmStart + dtcmSize;
+    const bool skipDTCM = num == 0 && region != memregion_DTCM;
 #ifndef __SWITCH__
     if (num == 0
         && dtcmEnd >= mirrorStart
@@ -675,32 +805,116 @@ bool ARMJIT_Memory::MapAtAddress(u32 addr) noexcept
             return false;
         }
 
-        bool success;
+        bool leftMapped = false;
         if (dtcmStart > mirrorStart)
         {
-            success = MapIntoRange(mirrorStart, 0, OffsetsPerRegion[region] + memoryOffset, dtcmStart - mirrorStart);
-            assert(success);
+            if (!MapIntoRange(
+                    mirrorStart, 0,
+                    OffsetsPerRegion[region] + memoryOffset,
+                    dtcmStart - mirrorStart))
+            {
+                return false;
+            }
+            leftMapped = true;
         }
         if (dtcmEnd < mirrorStart + mirrorSize)
         {
             u32 offset = dtcmStart - mirrorStart + dtcmSize;
-            success = MapIntoRange(dtcmEnd, 0, OffsetsPerRegion[region] + memoryOffset + offset, mirrorSize - offset);
-            assert(success);
+            if (!MapIntoRange(
+                    dtcmEnd, 0,
+                    OffsetsPerRegion[region] + memoryOffset + offset,
+                    mirrorSize - offset))
+            {
+                if (leftMapped
+                    && !UnmapFromRange(
+                        mirrorStart, 0,
+                        OffsetsPerRegion[region] + memoryOffset,
+                        dtcmStart - mirrorStart))
+                {
+                    Log(LogLevel::Error,
+                        "failed to roll back partial fastmem mirror %08X",
+                        mirrorStart);
+                    std::abort();
+                }
+                return false;
+            }
         }
     }
     else
     {
-        bool succeded = MapIntoRange(mirrorStart, num, OffsetsPerRegion[region] + memoryOffset, mirrorSize);
-        assert(succeded);
+        if (!MapIntoRange(
+                mirrorStart, num,
+                OffsetsPerRegion[region] + memoryOffset, mirrorSize))
+        {
+            return false;
+        }
     }
 #endif
 
+#ifndef __SWITCH__
+    const auto abandonMappedMirror = [&]() noexcept {
+        bool unmapped = true;
+        if (num == 0
+            && dtcmEnd >= mirrorStart
+            && dtcmStart < mirrorStart + mirrorSize)
+        {
+            if (dtcmStart > mirrorStart)
+            {
+                unmapped = UnmapFromRange(
+                    mirrorStart, 0,
+                    OffsetsPerRegion[region] + memoryOffset,
+                    dtcmStart - mirrorStart) && unmapped;
+            }
+            if (dtcmEnd < mirrorStart + mirrorSize)
+            {
+                const u32 dtcmOffset =
+                    dtcmStart - mirrorStart + dtcmSize;
+                unmapped = UnmapFromRange(
+                    dtcmEnd, 0,
+                    OffsetsPerRegion[region] + memoryOffset + dtcmOffset,
+                    mirrorSize - dtcmOffset) && unmapped;
+            }
+        }
+        else
+        {
+            unmapped = UnmapFromRange(
+                mirrorStart, num,
+                OffsetsPerRegion[region] + memoryOffset,
+                mirrorSize);
+        }
+        for (u32 pageOffset = 0u; pageOffset < mirrorSize;)
+        {
+            if (skipDTCM && mirrorStart + pageOffset == dtcmStart)
+            {
+                pageOffset += dtcmSize;
+                continue;
+            }
+            states[(mirrorStart + pageOffset) >> PageShift] =
+                memstate_Unmapped;
+            pageOffset += PageSize;
+        }
+        if (!unmapped)
+        {
+
+            Log(LogLevel::Error,
+                "failed to abandon unsafe fastmem mirror %08X", mirrorStart);
+            std::abort();
+        }
+    };
+#endif
+
     AddressRange* range = NDS.JIT.CodeMemRegions[region] + memoryOffset / 512;
+    const auto pageIsProtected = [&](u32 offset) noexcept
+    {
+        const bool hasCode = isExecutable && PageContainsCode(&range[offset / 512], PageSize);
+        const bool hasLineage = region == memregion_MainRAM
+            && MainRAMHostPageHasLineage(memoryOffset + offset);
+        return hasCode || hasLineage;
+    };
 
     // this overcomplicated piece of code basically just finds whole pieces of code memory
     // which can be mapped/protected
     u32 offset = 0;
-    bool skipDTCM = num == 0 && region != memregion_DTCM;
     while (offset < mirrorSize)
     {
         if (skipDTCM && mirrorStart + offset == dtcmStart)
@@ -710,31 +924,53 @@ bool ARMJIT_Memory::MapAtAddress(u32 addr) noexcept
         else
         {
             u32 sectionOffset = offset;
-            bool hasCode = isExecutable && PageContainsCode(&range[offset / 512], PageSize);
+            bool isProtected = pageIsProtected(offset);
             while (offset < mirrorSize
-                && (!isExecutable || PageContainsCode(&range[offset / 512], PageSize) == hasCode)
+                && pageIsProtected(offset) == isProtected
                 && (!skipDTCM || mirrorStart + offset != NDS.ARM9.DTCMBase))
             {
                 assert(states[(mirrorStart + offset) >> PageShift] == memstate_Unmapped);
-                states[(mirrorStart + offset) >> PageShift] = hasCode ? memstate_MappedProtected : memstate_MappedRW;
                 offset += PageSize;
             }
 
             u32 sectionSize = offset - sectionOffset;
 
 #if defined(__SWITCH__)
-            if (!hasCode)
+            if (!isProtected)
             {
                 //printf("trying to map %x (size: %x) from %x\n", mirrorStart + sectionOffset, sectionSize, sectionOffset + memoryOffset + OffsetsPerRegion[region]);
-                bool succeded = MapIntoRange(mirrorStart + sectionOffset, num, sectionOffset + memoryOffset + OffsetsPerRegion[region], sectionSize);
-                assert(succeded);
+                if (!MapIntoRange(
+                        mirrorStart + sectionOffset, num,
+                        sectionOffset + memoryOffset
+                            + OffsetsPerRegion[region],
+                        sectionSize))
+                {
+                    Log(LogLevel::Error,
+                        "failed to map Switch fastmem section %08X",
+                        mirrorStart + sectionOffset);
+                    std::abort();
+                }
             }
 #else
-            if (hasCode)
+            if (isProtected)
             {
-                SetCodeProtectionRange(mirrorStart + sectionOffset, sectionSize, num, 1);
+                if (!SetCodeProtectionRange(
+                        mirrorStart + sectionOffset,
+                        sectionSize, num, 1))
+                {
+                    abandonMappedMirror();
+                    return false;
+                }
             }
 #endif
+
+            for (u32 pageOffset = sectionOffset;
+                 pageOffset < offset; pageOffset += PageSize)
+            {
+                states[(mirrorStart + pageOffset) >> PageShift] = isProtected
+                    ? memstate_MappedProtected
+                    : memstate_MappedRW;
+            }
         }
     }
 

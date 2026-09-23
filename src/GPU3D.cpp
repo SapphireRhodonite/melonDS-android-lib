@@ -558,6 +558,8 @@ void GPU3D::DoSavestate(Savestate* file) noexcept
     file->Var32(&TexParam);
     file->Var32(&TexPalette);
     RenderFrameIdentical = false;
+    if (!file->Saving && CurrentRenderer != nullptr)
+        CurrentRenderer->InvalidateRenderProductIdentities();
     if (softRenderer && softRenderer->IsThreaded())
     {
         softRenderer->EnableRenderThread();
@@ -2599,6 +2601,18 @@ bool GPU3D::GetLastServedCaptureSourceIdentity(
         return false;
     }
     return CurrentRenderer->GetLastServedCaptureSourceIdentity(outIdentity);
+}
+
+bool GPU3D::GetLiveRenderProductIdentity(
+    LiveRenderProductIdentity& outIdentity) const noexcept
+{
+    if (AbortFrame || CurrentRenderer == nullptr)
+    {
+        outIdentity = {};
+        return false;
+    }
+
+    return CurrentRenderer->GetLiveRenderProductIdentity(outIdentity);
 }
 
 bool GPU3D::IsRendererAccelerated() const noexcept

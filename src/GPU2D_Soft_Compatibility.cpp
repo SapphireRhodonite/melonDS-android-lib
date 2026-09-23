@@ -1394,6 +1394,7 @@ void CompatibilitySoftRenderer::DoCapture(u32 line, u32 width, u32 sourceLine)
 
         static_assert(VRAMDirtyGranularity == 512);
         GPU.VRAMDirty[dstvram][(dstaddr * 2) / VRAMDirtyGranularity] = true;
+        GPU.VRAMDirty_LCDC[dstvram][(dstaddr * 2) / VRAMDirtyGranularity] = true;
 
         switch ((captureCnt >> 29) & 0x3)
         {
@@ -1814,6 +1815,7 @@ void CompatibilitySoftRenderer::DoCapture(u32 line, u32 width, u32 sourceLine)
 
     static_assert(VRAMDirtyGranularity == 512);
     GPU.VRAMDirty[dstvram][(dstaddr * 2) / VRAMDirtyGranularity] = true;
+    GPU.VRAMDirty_LCDC[dstvram][(dstaddr * 2) / VRAMDirtyGranularity] = true;
 
     auto packCaptureColor = [](u32 val) -> u16 {
         u32 r = (val >> 1) & 0x1F;

@@ -12,38 +12,15 @@ namespace melonDS
 
 constexpr uint64_t kFenceWaitTimeoutNs = 2'000'000'000ull;
 
-TexcacheVulkanLoader::TexcacheVulkanLoader(VulkanPipelineProfile pipelineProfile)
+TexcacheVulkanLoader::TexcacheVulkanLoader()
     : State(std::make_shared<SharedState>())
 {
-    State->PipelineProfile = pipelineProfile;
 }
 
 TexcacheVulkanLoader::~TexcacheVulkanLoader()
 {
     if (State != nullptr && State.use_count() == 1)
         CleanupVulkanState();
-}
-
-bool TexcacheVulkanLoader::SetPipelineProfile(VulkanPipelineProfile pipelineProfile)
-{
-    if (State == nullptr)
-        State = std::make_shared<SharedState>();
-
-    if (State->PipelineProfile == pipelineProfile)
-        return true;
-
-    if (!State->TextureArrays.empty())
-        return false;
-
-    State->PipelineProfile = pipelineProfile;
-    return true;
-}
-
-VulkanPipelineProfile TexcacheVulkanLoader::GetPipelineProfile() const noexcept
-{
-    return State != nullptr
-        ? State->PipelineProfile
-        : VulkanPipelineProfile::Compatibility;
 }
 
 bool TexcacheVulkanLoader::EnsureVulkanState()
@@ -114,8 +91,20 @@ void TexcacheVulkanLoader::CleanupVulkanState()
     if (State == nullptr)
         return;
 
+    auto& vulkanContext = VulkanContext::Get();
+
+    std::unique_lock<std::mutex> queueLock(
+        vulkanContext.GetQueueLock(), std::defer_lock);
+    std::unique_lock<std::mutex> presentQueueLock(
+        vulkanContext.GetPresentQueueLock(), std::defer_lock);
     if (State->Device != VK_NULL_HANDLE)
+    {
+        if (vulkanContext.IsPresentQueueDedicated())
+            std::lock(queueLock, presentQueueLock);
+        else
+            queueLock.lock();
         vkDeviceWaitIdle(State->Device);
+    }
 
     for (auto& [handle, textureArray] : State->TextureArrays)
     {
@@ -169,6 +158,11 @@ void TexcacheVulkanLoader::CleanupVulkanState()
         vkDestroyCommandPool(State->Device, State->CommandPool, nullptr);
         State->CommandPool = VK_NULL_HANDLE;
     }
+
+    if (presentQueueLock.owns_lock())
+        presentQueueLock.unlock();
+    if (queueLock.owns_lock())
+        queueLock.unlock();
 
     if (State->ContextAcquired)
     {
@@ -275,20 +269,21 @@ TexcacheVulkanLoader::TextureHandle TexcacheVulkanLoader::GenerateTexture(u32 wi
     textureArray.Width = width;
     textureArray.Height = height;
     textureArray.Layers = layers;
-    textureArray.LayerOpaque.assign(layers, 0u);
-    const bool fastPathResources = UsesVulkanFastPath(State->PipelineProfile);
-    if (fastPathResources)
+    textureArray.LayerFlags.assign(layers, 0u);
+    const bool normalizedTextureResources =
+        GetVulkanTextureDescriptorPolicy().RequiresNormalizedTextureDescriptor();
+    if (normalizedTextureResources)
     {
-        textureArray.LayerPixels.assign(
+
+        textureArray.LayerPixels.reset(new u32[
             static_cast<size_t>(width)
                 * static_cast<size_t>(height)
-                * static_cast<size_t>(layers),
-            0u);
+                * static_cast<size_t>(layers)]);
     }
 
     VkImageCreateInfo imageCreateInfo{};
     imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    imageCreateInfo.flags = fastPathResources
+    imageCreateInfo.flags = normalizedTextureResources
         ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT
         : 0u;
     imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
@@ -349,7 +344,7 @@ TexcacheVulkanLoader::TextureHandle TexcacheVulkanLoader::GenerateTexture(u32 wi
         return 0;
     }
 
-    if (fastPathResources)
+    if (normalizedTextureResources)
     {
         arrayViewCreateInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
         if (vkCreateImageView(
@@ -517,16 +512,14 @@ void TexcacheVulkanLoader::UploadTexture(TextureHandle handle, u32 width, u32 he
     const size_t layerPixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
     bool layerOpaque = true;
     const u32* sourcePixels = static_cast<const u32*>(data);
-    if (!textureArray.LayerPixels.empty())
+    if (textureArray.LayerPixels)
     {
         const size_t layerPixelOffset = static_cast<size_t>(layer) * layerPixelCount;
-        if (layerPixelOffset + layerPixelCount <= textureArray.LayerPixels.size())
-        {
-            std::memcpy(
-                &textureArray.LayerPixels[layerPixelOffset],
-                sourcePixels,
-                layerPixelCount * sizeof(u32));
-        }
+        std::memcpy(
+            &textureArray.LayerPixels[layerPixelOffset],
+            sourcePixels,
+            layerPixelCount * sizeof(u32));
+        textureArray.LayerFlags[layer] |= TextureArray::CpuMirrorReady;
     }
     for (size_t pixel = 0; pixel < layerPixelCount; pixel++)
     {
@@ -536,8 +529,9 @@ void TexcacheVulkanLoader::UploadTexture(TextureHandle handle, u32 width, u32 he
             break;
         }
     }
-    if (layer < textureArray.LayerOpaque.size())
-        textureArray.LayerOpaque[layer] = layerOpaque ? 1u : 0u;
+    if (layer < textureArray.LayerFlags.size())
+        textureArray.LayerFlags[layer] = (textureArray.LayerFlags[layer] & ~TextureArray::Opaque)
+            | (layerOpaque ? TextureArray::Opaque : 0u);
 
     const VkDeviceSize requiredStagingSize = static_cast<VkDeviceSize>(layerPixelCount * sizeof(u32));
     SharedState::UploadSlot* uploadSlot = nullptr;
@@ -815,10 +809,10 @@ bool TexcacheVulkanLoader::IsTextureLayerOpaque(TextureHandle handle, u32 layer)
         return false;
 
     const TextureArray& textureArray = it->second;
-    if (layer >= textureArray.LayerOpaque.size())
+    if (layer >= textureArray.LayerFlags.size())
         return false;
 
-    return textureArray.LayerOpaque[layer] != 0u;
+    return (textureArray.LayerFlags[layer] & TextureArray::Opaque) != 0u;
 }
 
 bool TexcacheVulkanLoader::ReadTextureLayerTexel(TextureHandle handle, u32 layer, u32 x, u32 y, u32* outTexel) const
@@ -838,10 +832,12 @@ bool TexcacheVulkanLoader::ReadTextureLayerTexel(TextureHandle handle, u32 layer
         (static_cast<size_t>(layer) * static_cast<size_t>(textureArray.Width) * static_cast<size_t>(textureArray.Height))
         + (static_cast<size_t>(y) * static_cast<size_t>(textureArray.Width))
         + static_cast<size_t>(x);
-    if (pixelIndex >= textureArray.LayerPixels.size())
+    if (!textureArray.LayerPixels)
         return false;
 
-    *outTexel = textureArray.LayerPixels[pixelIndex];
+    *outTexel = (textureArray.LayerFlags[layer] & TextureArray::CpuMirrorReady)
+        ? textureArray.LayerPixels[pixelIndex]
+        : 0u;
     return true;
 }
 

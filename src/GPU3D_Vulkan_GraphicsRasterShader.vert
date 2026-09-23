@@ -40,7 +40,13 @@ void main()
     float y = vPosition.y;
     float z = vPosition.z;
     float reciprocalW = vPosition.w;
-    float depth = clamp(z * (1.0 / 16777216.0), 0.0, 1.0);
+
+    uint polyAttrV = vTriInfo1In.z;
+    uint flagsV = vTriInfo0In.x;
+    float ventanaIgual = (polyAttrV & (1u << 14u)) != 0u
+        ? ((flagsV & (1u << 4u)) != 0u ? 512.0 : 1024.0)
+        : 0.0;
+    float depth = clamp((z - ventanaIgual) * (1.0 / 16777216.0), 0.0, 1.0);
 
     float rawW = reciprocalW > 0.000001 ? (1.0 / reciprocalW) : 1.0;
     float clipW = rawW * (1.0 / 65536.0);
