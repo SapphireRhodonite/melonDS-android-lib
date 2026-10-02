@@ -460,6 +460,7 @@ void CartRetail::Reset()
 
     SRAMCmd = 0;
     SRAMAddr = 0;
+    SRAMFirstAddr = 0;
     SRAMStatus = 0;
 }
 
@@ -495,6 +496,33 @@ void CartRetail::DoSavestate(Savestate* file)
         Platform::WriteNDSSave(SRAM.get(), SRAMLength, 0, SRAMLength, UserData);
 }
 
+void CartRetail::DoSavestateExtra(Savestate* file, u32 spiPos)
+{
+    if (file->Saving || file->HasSection("NCSP"))
+    {
+        file->Section("NCSP");
+        file->Var32(&SRAMFirstAddr);
+    }
+    else
+    {
+        SRAMFirstAddr = SRAMAddr;
+        if (SRAMStatus & (1<<1))
+        {
+            u32 addrBytes = SRAMType == 1 ? 1 : (SRAMType == 3 || SRAMLength > 65536 ? 3 : 2);
+            if (SRAMCmd == 0x02 || ((SRAMType == 1 || SRAMType == 3) && SRAMCmd == 0x0A))
+            {
+                if (spiPos > addrBytes)
+                    SRAMFirstAddr -= spiPos - addrBytes;
+            }
+            else if (SRAMType == 3 && spiPos >= 3)
+            {
+                if (SRAMCmd == 0xD8) SRAMFirstAddr -= 0x10000;
+                else if (SRAMCmd == 0xDB) SRAMFirstAddr -= 0x100;
+            }
+        }
+    }
+}
+
 void CartRetail::SetSaveMemory(const u8* savedata, u32 savelen)
 {
     if (!SRAM) return;
@@ -513,16 +541,7 @@ int CartRetail::ROMCommandStart(NDS& nds, NDSCart::NDSCartSlot& cartslot, const 
     case 0xB7:
         {
             u32 addr = (cmd[1]<<24) | (cmd[2]<<16) | (cmd[3]<<8) | cmd[4];
-            memset(data, 0, len);
-
-            if (((addr + len - 1) >> 12) != (addr >> 12))
-            {
-                u32 len1 = 0x1000 - (addr & 0xFFF);
-                ReadROM_B7(addr, len1, data, 0);
-                ReadROM_B7(addr+len1, len-len1, data, len1);
-            }
-            else
-                ReadROM_B7(addr, len, data, 0);
+            ReadROM_B7(addr, len, data, 0);
         }
         return 0;
 
@@ -537,6 +556,10 @@ u8 CartRetail::SPIWrite(u8 val, u32 pos, bool last)
 
     if (pos == 0)
     {
+        SRAMCmd = val;
+        SRAMAddr = 0;
+        SRAMFirstAddr = 0;
+
         // handle generic commands with no parameters
         switch (val)
         {
@@ -546,10 +569,6 @@ u8 CartRetail::SPIWrite(u8 val, u32 pos, bool last)
         case 0x06: // write enable
             SRAMStatus |= (1<<1);
             return 0;
-
-        default:
-            SRAMCmd = val;
-            SRAMAddr = 0;
         }
 
         return 0xFF;
@@ -562,6 +581,27 @@ u8 CartRetail::SPIWrite(u8 val, u32 pos, bool last)
     case 3: return SRAMWrite_FLASH(val, pos, last);
     default: return 0xFF;
     }
+}
+
+void CartRetail::SPIRelease()
+{
+    bool write = SRAMCmd == 0x02 ||
+                 ((SRAMType == 1 || SRAMType == 3) && SRAMCmd == 0x0A) ||
+                 (SRAMType == 3 && (SRAMCmd == 0xD8 || SRAMCmd == 0xDB));
+    if (write && SRAM && (SRAMStatus & (1<<1)))
+    {
+        u32 offset = SRAMFirstAddr;
+        if (SRAMType == 1 && SRAMCmd == 0x0A)
+            offset += 0x100;
+        u32 len = std::min(SRAMAddr - SRAMFirstAddr, SRAMLength);
+        if (len)
+        {
+            Platform::WriteNDSSave(SRAM.get(), SRAMLength, offset & (SRAMLength-1), len, UserData);
+            SRAMStatus &= ~(1<<1);
+        }
+    }
+    SRAMCmd = 0;
+    SRAMFirstAddr = SRAMAddr;
 }
 
 void CartRetail::ReadROM_B7(u32 addr, u32 len, u8* data, u32 offset) const
@@ -581,7 +621,14 @@ void CartRetail::ReadROM_B7(u32 addr, u32 len, u8* data, u32 offset) const
             addr = 0x8000 + (addr & 0x1FF);
     }
 
-    memcpy(data+offset, ROM.get()+addr, len);
+    while (len)
+    {
+        u32 chunk = std::min(len, 0x1000 - (addr & 0xFFF));
+        memcpy(data + offset, ROM.get() + addr, chunk);
+        offset += chunk;
+        len -= chunk;
+        addr &= ~0xFFF;
+    }
 }
 
 u8 CartRetail::SRAMWrite_EEPROMTiny(u8 val, u32 pos, bool last)
@@ -612,13 +659,6 @@ u8 CartRetail::SRAMWrite_EEPROMTiny(u8 val, u32 pos, bool last)
                 SRAM[(SRAMAddr + ((SRAMCmd==0x0A)?0x100:0)) & 0x1FF] = val;
             }
             SRAMAddr++;
-        }
-        if (last)
-        {
-            SRAMStatus &= ~(1<<1);
-            Platform::WriteNDSSave(SRAM.get(), SRAMLength,
-                                   (SRAMFirstAddr + ((SRAMCmd==0x0A)?0x100:0)) & 0x1FF, SRAMAddr-SRAMFirstAddr,
-                                   UserData);
         }
         return 0;
 
@@ -678,13 +718,6 @@ u8 CartRetail::SRAMWrite_EEPROM(u8 val, u32 pos, bool last)
             }
             SRAMAddr++;
         }
-        if (last)
-        {
-            SRAMStatus &= ~(1<<1);
-            Platform::WriteNDSSave(SRAM.get(), SRAMLength,
-                                   SRAMFirstAddr & (SRAMLength-1), SRAMAddr-SRAMFirstAddr,
-                                   UserData);
-        }
         return 0;
 
     case 0x03: // read
@@ -736,13 +769,6 @@ u8 CartRetail::SRAMWrite_FLASH(u8 val, u32 pos, bool last)
             }
             SRAMAddr++;
         }
-        if (last)
-        {
-            SRAMStatus &= ~(1<<1);
-            Platform::WriteNDSSave(SRAM.get(), SRAMLength,
-                                   SRAMFirstAddr & (SRAMLength-1), SRAMAddr-SRAMFirstAddr,
-                                   UserData);
-        }
         return 0;
 
     case 0x03: // read
@@ -773,13 +799,6 @@ u8 CartRetail::SRAMWrite_FLASH(u8 val, u32 pos, bool last)
                 SRAM[SRAMAddr & (SRAMLength-1)] = val;
             }
             SRAMAddr++;
-        }
-        if (last)
-        {
-            SRAMStatus &= ~(1<<1);
-            Platform::WriteNDSSave(SRAM.get(), SRAMLength,
-                                   SRAMFirstAddr & (SRAMLength-1), SRAMAddr-SRAMFirstAddr,
-                                   UserData);
         }
         return 0;
 
@@ -821,13 +840,6 @@ u8 CartRetail::SRAMWrite_FLASH(u8 val, u32 pos, bool last)
                 SRAMAddr++;
             }
         }
-        if (last)
-        {
-            SRAMStatus &= ~(1<<1);
-            Platform::WriteNDSSave(SRAM.get(), SRAMLength,
-                                   SRAMFirstAddr & (SRAMLength-1), SRAMAddr-SRAMFirstAddr,
-                                   UserData);
-        }
         return 0;
 
     case 0xDB: // page erase
@@ -844,13 +856,6 @@ u8 CartRetail::SRAMWrite_FLASH(u8 val, u32 pos, bool last)
                 SRAM[SRAMAddr & (SRAMLength-1)] = 0;
                 SRAMAddr++;
             }
-        }
-        if (last)
-        {
-            SRAMStatus &= ~(1<<1);
-            Platform::WriteNDSSave(SRAM.get(), SRAMLength,
-                                   SRAMFirstAddr & (SRAMLength-1), SRAMAddr-SRAMFirstAddr,
-                                   UserData);
         }
         return 0;
 
@@ -1128,6 +1133,11 @@ void CartRetailIR::DoSavestate(Savestate* file)
     CartRetail::DoSavestate(file);
 
     file->Var8(&IRCmd);
+}
+
+void CartRetailIR::DoSavestateExtra(Savestate* file, u32 spiPos)
+{
+    CartRetail::DoSavestateExtra(file, IRCmd == 0 && spiPos > 0 ? spiPos - 1 : 0);
 }
 
 u8 CartRetailIR::SPIWrite(u8 val, u32 pos, bool last)
@@ -1523,6 +1533,24 @@ void NDSCartSlot::DoSavestate(Savestate* file) noexcept
     }
 
     if (Cart) Cart->DoSavestate(file);
+
+    if (file->Saving || file->HasSection("NDCF"))
+    {
+        file->Section("NDCF");
+        file->Var32(&ROMDataNext);
+        file->Var32(&ROMDataCount);
+        file->Bool32(&ROMReadStalled);
+        if (ROMDataCount > 2)
+            file->Error = true;
+    }
+    else
+    {
+        ROMDataNext = 0;
+        ROMDataCount = (!(ROMCnt & (1<<30)) && (ROMCnt & (1<<23))) ? 1 : 0;
+        ROMReadStalled = ROMDataCount != 0;
+    }
+
+    if (Cart) Cart->DoSavestateExtra(file, SPIHold ? SPIDataPos : 0);
 }
 
 
@@ -1796,6 +1824,9 @@ void NDSCartSlot::ResetCart() noexcept
 
     memset(ROMCommand.data(), 0, sizeof(ROMCommand));
     ROMData = 0;
+    ROMDataNext = 0;
+    ROMDataCount = 0;
+    ROMReadStalled = false;
 
     Key2_X = 0;
     Key2_Y = 0;
@@ -1826,17 +1857,45 @@ void NDSCartSlot::ROMPrepareData(u32 param) noexcept
 {
     if (TransferDir == 0)
     {
+        u32 data;
         if (TransferPos >= TransferLen)
-            ROMData = 0;
+            data = 0;
         else
-            ROMData = *(u32*)&TransferData[TransferPos];
+            data = *(u32*)&TransferData[TransferPos];
+
+        if (!(ROMCnt & (1<<30)) && ROMDataCount)
+            ROMDataNext = data;
+        else
+            ROMData = data;
 
         TransferPos += 4;
     }
 
-    ROMCnt |= (1<<23);
+    if (!(ROMCnt & (1<<30)))
+        ROMDataCount++;
 
-    if (NDS.ExMemCnt[0] & (1<<11))
+    RaiseDRQ();
+
+    if (!(ROMCnt & (1<<30)))
+    {
+        ROMReadStalled = ROMDataCount == 2;
+        if (!ROMReadStalled)
+            AdvanceROMTransfer(true);
+    }
+}
+
+void NDSCartSlot::RaiseDRQ() noexcept
+{
+    ROMCnt |= (1<<23);
+    CheckDMA((NDS.ExMemCnt[0]>>11)&1);
+}
+
+void NDSCartSlot::CheckDMA(u32 cpu) noexcept
+{
+    if (!(ROMCnt & (1<<23)) || cpu != ((NDS.ExMemCnt[0]>>11)&1))
+        return;
+
+    if (cpu)
         NDS.CheckDMAs(1, 0x12);
     else
         NDS.CheckDMAs(0, 0x05);
@@ -1883,6 +1942,8 @@ void NDSCartSlot::WriteROMCnt(u32 val) noexcept
 
     TransferPos = 0;
     TransferLen = datasize;
+    ROMDataCount = 0;
+    ROMReadStalled = false;
 
     *(u32*)&TransferCmd[0] = *(u32*)&ROMCommand[0];
     *(u32*)&TransferCmd[4] = *(u32*)&ROMCommand[4];
@@ -1931,10 +1992,8 @@ void NDSCartSlot::WriteROMCnt(u32 val) noexcept
         NDS.ScheduleEvent(Event_ROMTransfer, false, xfercycle*(cmddelay+4), ROMTransfer_PrepareData, 0);
 }
 
-void NDSCartSlot::AdvanceROMTransfer() noexcept
+void NDSCartSlot::AdvanceROMTransfer(bool fromTransferEvent) noexcept
 {
-    ROMCnt &= ~(1<<23);
-
     if (TransferPos < TransferLen)
     {
         u32 xfercycle = (ROMCnt & (1<<27)) ? 8 : 5;
@@ -1945,9 +2004,9 @@ void NDSCartSlot::AdvanceROMTransfer() noexcept
                 delay += ((ROMCnt >> 16) & 0x3F);
         }
 
-        NDS.ScheduleEvent(Event_ROMTransfer, false, xfercycle*delay, ROMTransfer_PrepareData, 0);
+        NDS.ScheduleEvent(Event_ROMTransfer, fromTransferEvent, xfercycle*delay, ROMTransfer_PrepareData, 0);
     }
-    else
+    else if (ROMCnt & (1<<30))
         ROMEndTransfer(0);
 }
 
@@ -1955,12 +2014,30 @@ u32 NDSCartSlot::ReadROMData() noexcept
 {
     if (ROMCnt & (1<<30)) return 0;
 
+    u32 ret = ROMData;
     if (ROMCnt & (1<<23))
     {
-        AdvanceROMTransfer();
+        ROMCnt &= ~(1<<23);
+        if (ROMDataCount)
+            ROMDataCount--;
+        if (ROMDataCount)
+            ROMData = ROMDataNext;
+
+        if (TransferPos < TransferLen)
+        {
+            if (ROMReadStalled)
+            {
+                ROMReadStalled = false;
+                AdvanceROMTransfer();
+            }
+        }
+        else if (!ROMDataCount)
+            ROMEndTransfer(0);
+        else
+            RaiseDRQ();
     }
 
-    return ROMData;
+    return ret;
 }
 
 void NDSCartSlot::WriteROMData(u32 val) noexcept
@@ -1971,6 +2048,7 @@ void NDSCartSlot::WriteROMData(u32 val) noexcept
 
     if (ROMCnt & (1<<23))
     {
+        ROMCnt &= ~(1<<23);
         if (TransferDir == 1)
         {
             if (TransferPos < TransferLen)
@@ -1986,9 +2064,10 @@ void NDSCartSlot::WriteROMData(u32 val) noexcept
 
 void NDSCartSlot::WriteSPICnt(u16 val) noexcept
 {
-    if ((SPICnt & 0x2040) == 0x2040 && (val & 0x2000) == 0x0000)
+    if (SPIHold && (SPICnt & ~val & (1<<13)))
     {
         // forcefully reset SPI hold
+        if (Cart) Cart->SPIRelease();
         SPIHold = false;
     }
 
@@ -2042,7 +2121,11 @@ void NDSCartSlot::WriteSPIData(u8 val) noexcept
         SPIDataPos++;
     }
 
-    if (Cart) SPIData = Cart->SPIWrite(val, SPIDataPos, islast);
+    if (Cart)
+    {
+        SPIData = Cart->SPIWrite(val, SPIDataPos, islast);
+        if (islast) Cart->SPIRelease();
+    }
     else      SPIData = 0;
 
     // SPI transfers one bit per cycle -> 8 cycles per byte

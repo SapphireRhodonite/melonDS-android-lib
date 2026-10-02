@@ -30,6 +30,7 @@
 #include "DSi_I2S.h"
 #include "SPU.h"
 #include "AudioOutputExactMath.h"
+#include "soundtouch/include/SoundTouch.h"
 
 #include "blip-buf/blip_buf.h"
 
@@ -53,10 +54,13 @@ struct OutputAdaptiveGeometry
     u32 safe;
 };
 
-static OutputAdaptiveGeometry GetOutputAdaptiveGeometry(u32 physicalCapacity)
+static OutputAdaptiveGeometry GetOutputAdaptiveGeometry(
+    u32 physicalCapacity, u32 requestedControlCapacity)
 {
 
-    const u32 controlCapacity = physicalCapacity / 2;
+    const u32 controlCapacity = requestedControlCapacity > 0
+        ? std::min(physicalCapacity / 2, requestedControlCapacity)
+        : physicalCapacity / 2;
     const u32 block = controlCapacity / 8;
     const u32 rateWindow = 2 * block;
     const u32 physicalReserve = 4 * block;
@@ -81,6 +85,23 @@ struct SPU::OutputSpillNode
     u32 readPos = 0;
     u32 writePos = 0;
     s16 samples[blip_max_frame * 2] {};
+};
+
+struct SPU::OutputTempoState
+{
+    static constexpr int SequenceMs = 20;
+    static constexpr int SeekWindowMs = 4;
+    static constexpr int OverlapMs = 4;
+    soundtouch::SoundTouch stream;
+
+    explicit OutputTempoState(double sampleRate)
+    {
+        stream.setSampleRate(static_cast<u32>(sampleRate));
+        stream.setChannels(2);
+        stream.setSetting(SETTING_SEQUENCE_MS, SequenceMs);
+        stream.setSetting(SETTING_SEEKWINDOW_MS, SeekWindowMs);
+        stream.setSetting(SETTING_OVERLAP_MS, OverlapMs);
+    }
 };
 
 u32 SPU::OutputRingLevelLocked() const
@@ -519,6 +540,7 @@ void SPU::Stop()
 
     blip_clear(BlipLeft);
     blip_clear(BlipRight);
+    OutputTempo.reset();
     BlipTimer = 0;
 
     ClearOutputQueueLocked();
@@ -1393,6 +1415,18 @@ void SPU::Mix(u32 spucycles)
 void SPU::BufferAudio()
 {
 
+    if (OutputTempoRequested.load(std::memory_order_acquire))
+    {
+        if (!OutputTempo)
+            OutputTempo = std::make_unique<OutputTempoState>(OutputSampleRate);
+        const u32 reset = OutputTempoResetEpoch.load(std::memory_order_acquire);
+        if (reset != OutputTempoResetSeen)
+        {
+            OutputTempo->stream.clear();
+            OutputTempoResetSeen = reset;
+        }
+    }
+
     const double sourceAppliedSkew =
         OutputSkewPublicado.load(std::memory_order_relaxed);
     const u32 ticksTerminados = (u32)BlipTimer;
@@ -1405,6 +1439,20 @@ void SPU::BufferAudio()
     s16 temp[blip_max_frame * 2];
     blip_read_samples(BlipLeft, temp, avail, true);
     blip_read_samples(BlipRight, temp + 1, avail, true);
+
+    if (OutputTempo)
+    {
+        float pcm[blip_max_frame * 2];
+        for (int i = 0; i < avail * 2; ++i)
+            pcm[i] = static_cast<float>(temp[i]) / 32768.0f;
+        OutputTempo->stream.setTempo(static_cast<float>(sourceAppliedSkew));
+        OutputTempo->stream.putSamples(pcm, static_cast<u32>(avail));
+        avail = static_cast<int>(OutputTempo->stream.receiveSamples(
+            pcm, blip_max_frame));
+        for (int i = 0; i < avail * 2; ++i)
+            temp[i] = static_cast<s16>(std::lround(std::clamp(
+                pcm[i] * 32768.0f, -32768.0f, 32767.0f)));
+    }
 
     std::unique_ptr<OutputSpillNode> spillCandidate;
     bool spillAllocationAttempted = false;
@@ -2028,6 +2076,14 @@ void SPU::BufferAudio()
     producerObservation.controllerRatio = AdaptRatio;
     producerObservation.desiredSkew = AdaptSkew;
     producerObservation.sourceAppliedSkew = sourceAppliedSkew;
+    producerObservation.blipRateSkew = OutputTempo ? 1.0 : sourceAppliedSkew;
+    if (OutputTempo)
+    {
+        producerObservation.timeStretchInputFrames =
+            OutputTempo->stream.numUnprocessedSamples();
+        producerObservation.timeStretchOutputFrames =
+            OutputTempo->stream.numSamples();
+    }
     producerObservation.appliedSkew =
         OutputSkewPublicado.load(std::memory_order_relaxed);
     producerObservation.sustainedProvisionalPhaseActive =
@@ -2118,6 +2174,7 @@ void SPU::DrainOutput()
 {
     Platform::Mutex_Lock(AudioLock);
     ClearOutputQueueLocked();
+    OutputTempoResetEpoch.fetch_add(1, std::memory_order_release);
     Platform::Mutex_Unlock(AudioLock);
 }
 
@@ -2126,6 +2183,7 @@ void SPU::DrainAndResetOutputAdaptivo()
     Platform::Mutex_Lock(AudioLock);
 
     ClearOutputQueueLocked();
+    OutputTempoResetEpoch.fetch_add(1, std::memory_order_release);
     AdaptReingresoPrimingReserva.store(0, std::memory_order_release);
     AdaptResetEpoch.fetch_add(1, std::memory_order_release);
     Platform::Mutex_Unlock(AudioLock);
@@ -2135,8 +2193,11 @@ void SPU::InitOutput()
 {
     Platform::Mutex_Lock(AudioLock);
 
-    blip_set_rates(BlipLeft, INTERNAL_SAMPLE_RATE * OutputSkew, OutputSampleRate);
-    blip_set_rates(BlipRight, INTERNAL_SAMPLE_RATE * OutputSkew, OutputSampleRate);
+    OutputTempo.reset();
+    const double blipSkew = OutputTempoRequested.load(std::memory_order_acquire)
+        ? 1.0 : OutputSkew;
+    blip_set_rates(BlipLeft, INTERNAL_SAMPLE_RATE * blipSkew, OutputSampleRate);
+    blip_set_rates(BlipRight, INTERNAL_SAMPLE_RATE * blipSkew, OutputSampleRate);
 
     u32 needSamples = (u32) ceil(INTERNAL_SAMPLE_RATE / 60 / INTERNAL_SAMPLE_RATE * OutputSampleRate);
     u32 newBufferSize = 512;
@@ -2242,7 +2303,8 @@ int SPU::ReadOutputAdaptivo(
     const int capacidad = (int)OutputBufferSize;
     Platform::Mutex_Unlock(AudioLock);
     const OutputAdaptiveGeometry geometry =
-        GetOutputAdaptiveGeometry((u32)capacidad);
+        GetOutputAdaptiveGeometry((u32)capacidad,
+            OutputControlCapacity.load(std::memory_order_acquire));
     if (capacidad > 1 && samples >= capacidad)
     {
         AudioOutputDrainObservation aggregate {};
@@ -2889,7 +2951,8 @@ void SPU::UpdateOutputAdaptivo(u64 hostConsumed, u64 ticksAlConsumo,
         (OutputSampleRate * (double)blip_max_ratio) /
         (double)INTERNAL_SAMPLE_RATE;
     const OutputAdaptiveGeometry geometry =
-        GetOutputAdaptiveGeometry(OutputBufferSize);
+        GetOutputAdaptiveGeometry(OutputBufferSize,
+            OutputControlCapacity.load(std::memory_order_acquire));
     const u64 bloque = geometry.block;
     const u64 ventanaRate = geometry.rateWindow;
     const double presupuestoRate = (double)geometry.rateWindow;
@@ -8669,6 +8732,26 @@ void SPU::ResetOutputAdaptivo()
     AdaptResetEpoch.fetch_add(1, std::memory_order_release);
 }
 
+void SPU::SetOutputLatencyFrames(u32 frames)
+{
+    if (OutputTempoRequested.load(std::memory_order_acquire))
+        frames = std::max(frames, static_cast<u32>(std::ceil(
+            OutputSampleRate * (OutputTempoState::SequenceMs
+                - OutputTempoState::OverlapMs) / 1000.0)));
+    u32 capacity = 8;
+    while (capacity < frames && capacity < (1u << 28))
+        capacity <<= 1;
+    capacity *= 4;
+    if (OutputControlCapacity.exchange(capacity, std::memory_order_acq_rel)
+        != capacity)
+        ResetOutputAdaptivo();
+}
+
+void SPU::EnableOutputTimeStretch()
+{
+    OutputTempoRequested.store(true, std::memory_order_release);
+}
+
 void SPU::SetOutputSampleRate(double rate)
 {
     OutputSampleRate = rate;
@@ -8678,8 +8761,10 @@ void SPU::SetOutputSampleRate(double rate)
 
 void SPU::SetOutputSkew(double skew)
 {
-    blip_set_rates(BlipLeft, INTERNAL_SAMPLE_RATE * skew, OutputSampleRate);
-    blip_set_rates(BlipRight, INTERNAL_SAMPLE_RATE * skew, OutputSampleRate);
+    const double blipSkew = OutputTempoRequested.load(std::memory_order_acquire)
+        ? 1.0 : skew;
+    blip_set_rates(BlipLeft, INTERNAL_SAMPLE_RATE * blipSkew, OutputSampleRate);
+    blip_set_rates(BlipRight, INTERNAL_SAMPLE_RATE * blipSkew, OutputSampleRate);
     OutputSkew = skew;
     OutputSkewPublicado.store(skew, std::memory_order_relaxed);
 }

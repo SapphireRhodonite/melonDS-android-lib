@@ -81,7 +81,23 @@ add_library(core STATIC
     tiny-AES-c/aes.c
     xxhash/xxhash.c
 
+    soundtouch/source/SoundTouch/AAFilter.cpp
+    soundtouch/source/SoundTouch/cpu_detect_x86.cpp
+    soundtouch/source/SoundTouch/FIFOSampleBuffer.cpp
+    soundtouch/source/SoundTouch/FIRFilter.cpp
+    soundtouch/source/SoundTouch/InterpolateCubic.cpp
+    soundtouch/source/SoundTouch/InterpolateLinear.cpp
+    soundtouch/source/SoundTouch/InterpolateShannon.cpp
+    soundtouch/source/SoundTouch/mmx_optimized.cpp
+    soundtouch/source/SoundTouch/RateTransposer.cpp
+    soundtouch/source/SoundTouch/SoundTouch.cpp
+    soundtouch/source/SoundTouch/sse_optimized.cpp
+    soundtouch/source/SoundTouch/TDStretch.cpp
     blip-buf/blip_buf.c)
+
+if (ANDROID_ABI STREQUAL "arm64-v8a")
+    target_compile_definitions(core PRIVATE SOUNDTOUCH_USE_NEON)
+endif()
 
 if (ENABLE_GDBSTUB)
     message(NOTICE "Enabling GDB stub")

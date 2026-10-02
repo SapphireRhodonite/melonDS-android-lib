@@ -525,6 +525,7 @@ public:
 
     [[nodiscard]] virtual const u32* GetFaithfulPrevLineaCompuesta() const noexcept;
     [[nodiscard]] virtual const u32* GetFaithfulLineaCompuesta() const noexcept;
+    [[nodiscard]] const u32* GetFaithfulPrevLine3DOperands() const noexcept;
     [[nodiscard]] const FaithfulCaptureProductMetadata&
         GetFaithfulCaptureProduct() const noexcept;
     [[nodiscard]] const FaithfulCaptureProductMetadata&
@@ -644,6 +645,7 @@ public:
         u32& outVramBank,
         CaptureSourceIdentity& outIdentity) const noexcept;
     virtual void BeginStructuredVulkan2DFrame() noexcept;
+    void PublishCompletedFaithfulFrame() noexcept;
     virtual void ClearStructuredVulkan2DState() noexcept;
     virtual void SeedStructuredVulkan2DCaptureBanksFromVram();
     virtual void SwapStructuredVulkan2DBuffers() noexcept;
@@ -1006,6 +1008,8 @@ private:
     void CaptureFaithfulLineRegs(u32 line, int n3dline, bool forceblank) noexcept;
     void CaptureFaithfulPhysicalScanoutLine(
         u32 physicalLine, u32 logicalVCount) noexcept;
+    void PublishFaithfulPhysicalSnapshot() noexcept;
+    void PublishFaithfulRegisterSnapshot() noexcept;
     void FinalizeFaithfulPhysicalScanoutLine(u32 physicalLine) noexcept;
     void CaptureFaithfulLiveRenderProductLine(
         u32 physicalLine, u32 logicalVCount,
@@ -1052,6 +1056,8 @@ private:
 
     std::array<u32, 2 * 192 * 256> FaithfulLineaCompuesta {};
     std::array<u32, 2 * 192 * 256> FaithfulPrevLineaCompuesta {};
+    std::array<u32, 192 * 256> FaithfulLine3DOperands {};
+    std::array<u32, 192 * 256> FaithfulPrevLine3DOperands {};
     std::array<FaithfulCaptureLineProductMetadata, 2 * 192>
         FaithfulCaptureLineProducts {};
     std::array<FaithfulCaptureLineProductMetadata, 2 * 192>
@@ -1120,6 +1126,7 @@ private:
     bool FaithfulPrevVisibleAllNative = false;
 
     u64 FaithfulPhysicalSidecarSeenEpoch = 0u;
+    bool FaithfulCompletedSnapshotPublished = false;
     bool FaithfulPhysicalSidecarCurrentStarted = false;
     bool FaithfulPhysicalRoutesCurrentComplete = false;
     bool FaithfulPhysicalRoutesPrevReady = false;

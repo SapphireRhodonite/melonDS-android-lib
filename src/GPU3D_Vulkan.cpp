@@ -665,7 +665,8 @@ bool VulkanRenderer3D::isRenderContextReusable(
 {
 
     return !isRenderContextRetained(context)
-        && PendingCaptureLineContext != &context;
+        && PendingCaptureLineContext != &context
+        && DeferredRenderContext != &context;
 }
 
 bool VulkanRenderer3D::hasRetainedRenderProducts() const noexcept
@@ -685,6 +686,7 @@ VulkanRenderer3D::~VulkanRenderer3D()
 
 void VulkanRenderer3D::Reset(GPU& gpu)
 {
+    (void)SetFrameSubmissionDeferred(false);
     (void)gpu;
     beginRenderProductEpoch();
 
@@ -737,8 +739,59 @@ void VulkanRenderer3D::VCount144(GPU& gpu)
     SkipRenderAtVCount215 = false;
 }
 
+bool VulkanRenderer3D::SetFrameSubmissionDeferred(bool enabled, VkSemaphore dependency, u64 value)
+{
+    if (enabled)
+    {
+        if (FrameSubmissionDeferred || DeferredRenderContext != nullptr
+            || DeferredRenderSubmitResult != VK_SUCCESS)
+            return false;
+        FrameSubmissionDeferred = true;
+        return true;
+    }
+    FrameSubmissionDeferred = false;
+    return flushDeferredRenderSubmission(dependency, value);
+}
+
+bool VulkanRenderer3D::flushDeferredRenderSubmission(VkSemaphore dependency, u64 value)
+{
+    if (DeferredRenderContext == nullptr)
+        return DeferredRenderSubmitResult == VK_SUCCESS;
+    RenderContext* context = std::exchange(DeferredRenderContext, nullptr);
+    VkSubmitInfo submit{};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &context->CommandBuffer;
+    VkTimelineSemaphoreSubmitInfo timeline{};
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    if (dependency != VK_NULL_HANDLE && value != 0u)
+    {
+        timeline.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+        timeline.waitSemaphoreValueCount = 1;
+        timeline.pWaitSemaphoreValues = &value;
+        submit.pNext = &timeline;
+        submit.waitSemaphoreCount = 1;
+        submit.pWaitSemaphores = &dependency;
+        submit.pWaitDstStageMask = &waitStage;
+    }
+    {
+        std::scoped_lock queueLock(VulkanContext::Get().GetQueueLock());
+        DeferredRenderSubmitResult = vkQueueSubmit(
+            Queue, 1, &submit, context->FrameFence);
+    }
+    if (DeferredRenderSubmitResult != VK_SUCCESS)
+    {
+        context->SubmittedMetadataValid = false;
+        Log(LogLevel::Error, "VulkanRenderer3D: deferred vkQueueSubmit failed (%d)",
+            static_cast<int>(DeferredRenderSubmitResult));
+    }
+    return DeferredRenderSubmitResult == VK_SUCCESS;
+}
+
 void VulkanRenderer3D::RenderFrame(GPU& gpu)
 {
+    if (!flushDeferredRenderSubmission())
+        return;
     CapturaExactaEsteFotograma = false;
 
     const bool prefetchNativeForCompose = ComposeFielPreciso3D
@@ -1460,6 +1513,8 @@ bool VulkanRenderer3D::submitFaithfulNativeProjectionForCurrentFrame()
 
 bool VulkanRenderer3D::prepareFaithfulExactCaptureLineCache()
 {
+    if (!flushDeferredRenderSubmission())
+        return false;
 
     if (!CurrentFrameServedIdentity.Valid
         || CurrentFrameServedIdentity.RenderProductEpoch == 0u
@@ -2417,6 +2472,7 @@ bool VulkanRenderer3D::ensureInitialized()
 
 void VulkanRenderer3D::destroyVulkan()
 {
+    (void)SetFrameSubmissionDeferred(false);
     if (Device != VK_NULL_HANDLE)
         (void)waitForDeviceIdle("renderer destruction");
 
@@ -3026,6 +3082,7 @@ void VulkanRenderer3D::destroyVulkan()
     Instance = VK_NULL_HANDLE;
     PhysicalDevice = VK_NULL_HANDLE;
     Device = VK_NULL_HANDLE;
+    DeferredRenderSubmitResult = VK_SUCCESS;
     Queue = VK_NULL_HANDLE;
     QueueFamilyIndex = 0;
     ResetQueryPool = nullptr;
@@ -3157,6 +3214,8 @@ bool VulkanRenderer3D::createTimestampQueryPool(VkQueryPool& queryPool)
 
 bool VulkanRenderer3D::waitForRenderContext(RenderContext& context)
 {
+    if (!flushDeferredRenderSubmission())
+        return false;
     if (Device == VK_NULL_HANDLE || context.FrameFence == VK_NULL_HANDLE)
         return false;
     if (isRenderContextRetained(context))
@@ -3267,6 +3326,8 @@ bool VulkanRenderer3D::waitForAllRenderContexts()
 
 bool VulkanRenderer3D::waitForReadbackSource()
 {
+    if (!flushDeferredRenderSubmission())
+        return false;
     if (Device == VK_NULL_HANDLE)
         return false;
 
@@ -3622,6 +3683,8 @@ bool VulkanRenderer3D::finalizeCaptureLineFrame(bool blocking)
 
 bool VulkanRenderer3D::waitForDeviceIdle(const char* reason)
 {
+    if (!flushDeferredRenderSubmission())
+        return false;
     if (Device == VK_NULL_HANDLE)
         return false;
 
@@ -12754,6 +12817,12 @@ bool VulkanRenderer3D::dispatchGraphicsRasterAndReadback(
     if (vkResetFences(Device, 1, &frameFence) != VK_SUCCESS)
         return false;
 
+    if (FrameSubmissionDeferred && context != nullptr && !nativeProjectionOnly
+        && !captureReadbackPath && graphicsTarget != nullptr)
+    {
+        DeferredRenderContext = context;
+    }
+    else
     {
         std::scoped_lock queueLock(VulkanContext::Get().GetQueueLock());
         const VkResult submitResult = vkQueueSubmit(Queue, 1, &submitInfo, frameFence);

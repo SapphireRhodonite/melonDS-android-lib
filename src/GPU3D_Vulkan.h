@@ -57,6 +57,8 @@ public:
     void Reset(GPU& gpu) override;
     void VCount144(GPU& gpu) override;
     void RenderFrame(GPU& gpu) override;
+    bool SetFrameSubmissionDeferred(bool enabled, VkSemaphore dependency = VK_NULL_HANDLE, u64 value = 0);
+    bool HasDeferredFrameSubmission() const { return DeferredRenderContext != nullptr; }
     void RestartFrame(GPU& gpu) override;
     u32* GetLine(int line) override;
 
@@ -614,6 +616,11 @@ private:
 
     VkInstance Instance = VK_NULL_HANDLE;
     VkPhysicalDevice PhysicalDevice = VK_NULL_HANDLE;
+    bool flushDeferredRenderSubmission(VkSemaphore dependency = VK_NULL_HANDLE, u64 value = 0);
+    bool FrameSubmissionDeferred = false;
+    RenderContext* DeferredRenderContext = nullptr;
+    VkResult DeferredRenderSubmitResult = VK_SUCCESS;
+
     VkDevice Device = VK_NULL_HANDLE;
     VkQueue Queue = VK_NULL_HANDLE;
     u32 QueueFamilyIndex = 0;

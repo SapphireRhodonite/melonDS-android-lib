@@ -451,7 +451,8 @@ void DSi::SetupDirectBoot()
         tsc->SetMode(0x00);
         Set_SCFG_Clock9(0x0000);
 
-        SCFG_EXT[0] &= ~0xC000;
+        SCFG_EXT[0] &= ~0x8000C000;
+        SCFG_EXT[1] &= ~(1u << 31);
         ApplyNewRAMSize(0);
     }
     else
@@ -2325,6 +2326,9 @@ bool DSi::ARM7GetMemRegion(u32 addr, bool write, MemRegion* region)
 
 u8 DSi::ARM9IORead8(u32 addr)
 {
+    if ((addr & 0xFFFFFF00) == 0x04004000 && !(SCFG_EXT[0] & (1u << 31)))
+        return 0;
+
     switch (addr)
     {
     case 0x04004000: return SCFG_BIOS & 0xFF;
@@ -2359,6 +2363,9 @@ u8 DSi::ARM9IORead8(u32 addr)
 u16 DSi::ARM9IORead16(u32 addr)
 {
     assert(ConsoleType == 1);
+    if ((addr & 0xFFFFFF00) == 0x04004000 && !(SCFG_EXT[0] & (1u << 31)))
+        return 0;
+
     switch (addr)
     {
     case 0x04004000: return SCFG_BIOS & 0xFF;
@@ -2395,6 +2402,9 @@ u16 DSi::ARM9IORead16(u32 addr)
 u32 DSi::ARM9IORead32(u32 addr)
 {
     assert(ConsoleType == 1);
+    if ((addr & 0xFFFFFF00) == 0x04004000 && !(SCFG_EXT[0] & (1u << 31)))
+        return 0;
+
     switch (addr)
     {
     case 0x04004000: return SCFG_BIOS & 0xFF;
@@ -2768,6 +2778,9 @@ void DSi::ARM9IOWrite32(u32 addr, u32 val)
 u8 DSi::ARM7IORead8(u32 addr)
 {
     assert(ConsoleType == 1);
+    if ((addr & 0xFFFFFF00) == 0x04004000 && !(SCFG_EXT[1] & (1u << 31)))
+        return 0;
+
 
     switch (addr)
     {
@@ -2824,6 +2837,9 @@ u8 DSi::ARM7IORead8(u32 addr)
 u16 DSi::ARM7IORead16(u32 addr)
 {
     assert(ConsoleType == 1);
+    if ((addr & 0xFFFFFF00) == 0x04004000 && !(SCFG_EXT[1] & (1u << 31)))
+        return 0;
+
     switch (addr)
     {
     case 0x04000218: return NDS::IE2;
@@ -2877,6 +2893,9 @@ u16 DSi::ARM7IORead16(u32 addr)
 u32 DSi::ARM7IORead32(u32 addr)
 {
     assert(ConsoleType == 1);
+    if ((addr & 0xFFFFFF00) == 0x04004000 && !(SCFG_EXT[1] & (1u << 31)))
+        return 0;
+
     switch (addr)
     {
     case 0x04000218: return NDS::IE2;

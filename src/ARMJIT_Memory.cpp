@@ -1680,11 +1680,6 @@ static void GPU_WriteVRAM_ARM7(u32 addr, T val) noexcept
     NDS::Current->GPU.WriteVRAM_ARM7<T>(addr, val);
 }
 
-u32 NDSCartSlot_ReadROMData()
-{ // TODO: Add a NDS* parameter, when NDS* is eventually implemented
-    return NDS::Current->NDSCartSlot.ReadROMData();
-}
-
 static u8 NDS_ARM9IORead8(u32 addr)
 {
     return NDS::Current->ARM9IORead8(addr);
@@ -1752,9 +1747,6 @@ void* ARMJIT_Memory::GetFuncForAddr(ARM* cpu, u32 addr, bool store, int size) co
         switch (addr & 0xFF000000)
         {
         case 0x04000000:
-            if (!store && size == 32 && addr == 0x04100010 && NDS.ExMemCnt[0] & (1<<11))
-                return (void*)NDSCartSlot_ReadROMData;
-
             /*
                 unfortunately we can't map GPU2D this way
                 since it's hidden inside an object

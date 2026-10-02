@@ -367,6 +367,9 @@ bool VulkanContext::initializeLocked()
             continue;
 
         std::vector<const char*> enabledDeviceExtensions(requiredDeviceExtensions.begin(), requiredDeviceExtensions.end());
+        const bool enableDisplayTiming = hasExtension(VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME, deviceExtensions);
+        if (enableDisplayTiming)
+            enabledDeviceExtensions.push_back(VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
         if (hasExtension(kPortabilitySubsetExtension, deviceExtensions))
             enabledDeviceExtensions.push_back(kPortabilitySubsetExtension);
         const bool hasExternalMemoryExtension = hasExtension(kOptionalExternalMemoryExtension, deviceExtensions);
@@ -593,6 +596,7 @@ bool VulkanContext::initializeLocked()
         TimestampPeriod = deviceProperties.limits.timestampPeriod;
         TimestampQueriesSupported = queueSupportsTimestamps;
         TimelineSemaphoresSupported = enableTimelineSemaphores;
+        DisplayTimingSupported = enableDisplayTiming;
         DynamicTextureIndexingSupported = enableDynamicTextureIndexing;
         DeviceProfile = candidateProfile;
         Platform::Log(
@@ -701,6 +705,7 @@ void VulkanContext::shutdownLocked()
     TimestampPeriod = 0.0f;
     TimestampQueriesSupported = false;
     TimelineSemaphoresSupported = false;
+    DisplayTimingSupported = false;
     DynamicTextureIndexingSupported = false;
     ForceDisableTimelineSemaphores = false;
     ForceDisableDynamicTextureIndexing = false;

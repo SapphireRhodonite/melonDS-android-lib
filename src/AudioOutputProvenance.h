@@ -56,6 +56,9 @@ struct AudioOutputProducerPacketObservation
     double desiredSkew = 0.0;
 
     double sourceAppliedSkew = 0.0;
+    std::uint32_t timeStretchInputFrames = 0;
+    std::uint32_t timeStretchOutputFrames = 0;
+    double blipRateSkew = 1.0;
     double appliedSkew = 0.0;
 
     bool sustainedProvisionalPhaseActive = false;

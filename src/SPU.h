@@ -302,6 +302,8 @@ public:
     }
 
     void SetOutputSpeedHint(double speed);
+    void SetOutputLatencyFrames(u32 frames);
+    void EnableOutputTimeStretch();
     void ResetOutputAdaptivo();
 
     void SetOutputSampleRate(double rate);
@@ -316,6 +318,7 @@ public:
 
 private:
     struct OutputSpillNode;
+    struct OutputTempoState;
 
     u32 OutputRingLevelLocked() const;
     u64 OutputLogicalLevelLocked() const;
@@ -333,6 +336,11 @@ private:
     melonDS::NDS& NDS;
 
     blip_t* BlipLeft;
+    std::atomic<u32> OutputControlCapacity {0};
+    std::unique_ptr<OutputTempoState> OutputTempo;
+    std::atomic<bool> OutputTempoRequested {false};
+    std::atomic<u32> OutputTempoResetEpoch {0};
+    u32 OutputTempoResetSeen = 0;
     blip_t* BlipRight;
     int BlipTimer = 0;
 

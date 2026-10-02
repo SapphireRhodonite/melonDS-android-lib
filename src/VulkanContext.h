@@ -54,6 +54,7 @@ public:
     PFN_vkGetSemaphoreCounterValueKHR GetSemaphoreCounterValue() const { return GetSemaphoreCounterValueFn; }
     PFN_vkResetQueryPoolEXT GetResetQueryPool() const { return ResetQueryPool; }
     bool SupportsTimelineSemaphores() const { return TimelineSemaphoresSupported; }
+    bool SupportsDisplayTiming() const { return DisplayTimingSupported; }
     bool SupportsDynamicTextureIndexing() const { return DynamicTextureIndexingSupported; }
     bool IsTimelineSemaphoreForcedOff() const { return ForceDisableTimelineSemaphores; }
     bool IsDynamicTextureIndexingForcedOff() const { return ForceDisableDynamicTextureIndexing; }
@@ -90,6 +91,7 @@ private:
     float TimestampPeriod = 0.0f;
     bool TimestampQueriesSupported = false;
     bool TimelineSemaphoresSupported = false;
+    bool DisplayTimingSupported = false;
     bool DynamicTextureIndexingSupported = false;
     bool ForceDisableTimelineSemaphores = false;
     bool ForceDisableDynamicTextureIndexing = false;

@@ -2754,6 +2754,7 @@ void SoftRenderer::ClearStructuredVulkan2DState() noexcept
     FaithfulVisibleAllNative = false;
     FaithfulPrevVisibleAllNative = false;
     FaithfulPhysicalSidecarSeenEpoch = 0u;
+    FaithfulCompletedSnapshotPublished = false;
     FaithfulPhysicalSidecarCurrentStarted = false;
     FaithfulPhysicalRoutesCurrentComplete = false;
     FaithfulPhysicalRoutesPrevReady = false;
@@ -2921,6 +2922,11 @@ const u32* SoftRenderer::GetFaithfulPrevLineaCompuesta() const noexcept
 const u32* SoftRenderer::GetFaithfulLineaCompuesta() const noexcept
 {
     return FaithfulLineaCompuesta.data();
+}
+
+const u32* SoftRenderer::GetFaithfulPrevLine3DOperands() const noexcept
+{
+    return FaithfulPrevLine3DOperands.data();
 }
 
 const SoftRenderer::FaithfulCaptureProductMetadata&
@@ -3507,6 +3513,124 @@ void EmpaquetarRegsFiel(const Unit& u, u32 line, int n3dline,
 }
 }
 
+void SoftRenderer::PublishFaithfulPhysicalSnapshot() noexcept
+{
+    if (FaithfulPhysicalRoutesCurrentComplete)
+    {
+        FaithfulPrevPhysicalScanoutLines = FaithfulPhysicalScanoutLines;
+        FaithfulPrevLiveRenderProductLines = FaithfulLiveRenderProductLines;
+        FaithfulPrevPhysicalScanoutGeneration =
+            FaithfulVisibleLineageGeneration;
+        FaithfulPhysicalRoutesPrevReady = true;
+    }
+    else
+    {
+        FaithfulPrevPhysicalScanoutLines.fill({});
+        FaithfulPrevLiveRenderProductLines.fill({});
+        FaithfulPrevPhysicalScanoutGeneration = 0u;
+        FaithfulPhysicalRoutesPrevReady = false;
+    }
+
+    if (FaithfulPhysicalSidecarCurrentComplete)
+    {
+        FaithfulPrevVisibleLineageRows = FaithfulVisibleLineageRows;
+        for (size_t rowIndex = 0u;
+             rowIndex < FaithfulVisibleLineageRows.size(); rowIndex++)
+        {
+            if (FaithfulVisibleLineageRows[rowIndex].RowKind()
+                != FaithfulVisibleLineageRowKind::Dense)
+            {
+                continue;
+            }
+            const size_t pixelOffset =
+                rowIndex * kStructuredScreenWidth;
+            std::copy_n(
+                FaithfulVisiblePixelLineageStorage.data() + pixelOffset,
+                kStructuredScreenWidth,
+                FaithfulPrevVisiblePixelLineageStorage.data()
+                    + pixelOffset);
+        }
+        FaithfulPrevVisibleLineageClassifiedStorage =
+            FaithfulVisibleLineageClassifiedStorage;
+        if (FaithfulVisibleAllNative)
+        {
+            if (!FaithfulPrevVisibleAllNative
+                || FaithfulPrevVisibleProductCount != 2u)
+            {
+                ResetFaithfulVisibleProductTable(
+                    FaithfulPrevVisibleProductTable,
+                    FaithfulPrevVisibleProductCount);
+            }
+        }
+        else
+        {
+            FaithfulPrevVisibleProductTable = FaithfulVisibleProductTable;
+            FaithfulPrevVisibleProductCount = FaithfulVisibleProductCount;
+        }
+        FaithfulPrevVisibleLineageGeneration =
+            FaithfulVisibleLineageGeneration;
+        FaithfulPrevVisibleAllNative = FaithfulVisibleAllNative;
+        FaithfulPhysicalSidecarPrevReady = true;
+    }
+    else
+    {
+
+        FaithfulPrevVisiblePixelLineageStorage.fill(
+            MakeFaithfulVisibleAmbiguousPixel());
+        FaithfulPrevVisibleLineageRows.fill({});
+        FaithfulPrevVisibleLineageClassifiedStorage.fill(0u);
+        FaithfulPrevVisibleProductTable.fill({});
+        FaithfulPrevVisibleProductCount = 0u;
+        FaithfulPrevVisibleLineageGeneration = 0u;
+        FaithfulPrevVisibleAllNative = false;
+        FaithfulPhysicalSidecarPrevReady = false;
+    }
+}
+
+void SoftRenderer::PublishFaithfulRegisterSnapshot() noexcept
+{
+    FaithfulPrevLineRegsStorage = FaithfulLineRegsStorage;
+    FaithfulPrevFrameMeta = FaithfulFrameMeta;
+    {
+        static const bool sondaL = std::getenv("MELON_SONDA_LATCH") != nullptr;
+        if (sondaL)
+            fprintf(stderr, "[lat] COPIA seq=%u prevMeta0=%u\n",
+                    FaithfulFrameSeq, FaithfulPrevFrameMeta[0] & 1u);
+    }
+
+    if (std::getenv("MELON_SWAP_FLIP") != nullptr)
+        FaithfulPrevFrameMeta[0] =
+            GPU.SwapSelladoBuffer[GPU.FrontBuffer] & 1u;
+    FaithfulPrevPaletteLatch = FaithfulPaletteLatch;
+    FaithfulPrevOAMLatch = FaithfulOAMLatch;
+
+    FaithfulPrevSwapScanout = FaithfulSwapScanout;
+    if (FaithfulComponerActivo[0] || FaithfulComponerActivo[1])
+        FaithfulPrevLineaCompuesta = FaithfulLineaCompuesta;
+    if (FaithfulComponerActivo[0])
+        FaithfulPrevLine3DOperands = FaithfulLine3DOperands;
+
+    FaithfulPrevModo2Linea = FaithfulModo2Linea;
+    FaithfulPrevCaptureProduct = FaithfulCaptureProduct;
+    FaithfulPrevCaptureLineProducts = FaithfulCaptureLineProducts;
+    FaithfulPrevCaptureProductPixelMask = FaithfulCaptureProductPixelMask;
+    FaithfulPrevCaptureProductMaterial = FaithfulCaptureProductMaterial;
+    FaithfulPrevCaptureProductCausalLines =
+        FaithfulCaptureProductCausalLines;
+
+    FaithfulPrevCaptureProductRecipeSlot =
+        FaithfulCaptureProductRecipeSlot;
+}
+
+void SoftRenderer::PublishCompletedFaithfulFrame() noexcept
+{
+    if (!UseFaithfulVulkan2D())
+        return;
+    PublishFaithfulPhysicalSnapshot();
+    PublishFaithfulRegisterSnapshot();
+    FaithfulCompletedSnapshotPublished = true;
+}
+
 void SoftRenderer::CaptureFaithfulPhysicalScanoutLine(
     u32 physicalLine, u32 logicalVCount) noexcept
 {
@@ -3523,6 +3647,7 @@ void SoftRenderer::CaptureFaithfulPhysicalScanoutLine(
     if (epochChanged)
     {
 
+        FaithfulCompletedSnapshotPublished = false;
         FaithfulPhysicalSidecarSeenEpoch = activeEpoch;
         FaithfulPhysicalScanoutLines.fill({});
         FaithfulPrevPhysicalScanoutLines.fill({});
@@ -3554,76 +3679,8 @@ void SoftRenderer::CaptureFaithfulPhysicalScanoutLine(
     if (engine == 0u && physicalLine == 0u)
     {
 
-        if (!epochChanged && FaithfulPhysicalRoutesCurrentComplete)
-        {
-            FaithfulPrevPhysicalScanoutLines = FaithfulPhysicalScanoutLines;
-            FaithfulPrevLiveRenderProductLines = FaithfulLiveRenderProductLines;
-            FaithfulPrevPhysicalScanoutGeneration =
-                FaithfulVisibleLineageGeneration;
-            FaithfulPhysicalRoutesPrevReady = true;
-        }
-        else
-        {
-            FaithfulPrevPhysicalScanoutLines.fill({});
-            FaithfulPrevLiveRenderProductLines.fill({});
-            FaithfulPrevPhysicalScanoutGeneration = 0u;
-            FaithfulPhysicalRoutesPrevReady = false;
-        }
-
-        if (!epochChanged && FaithfulPhysicalSidecarCurrentComplete)
-        {
-            FaithfulPrevVisibleLineageRows = FaithfulVisibleLineageRows;
-            for (size_t rowIndex = 0u;
-                 rowIndex < FaithfulVisibleLineageRows.size(); rowIndex++)
-            {
-                if (FaithfulVisibleLineageRows[rowIndex].RowKind()
-                    != FaithfulVisibleLineageRowKind::Dense)
-                {
-                    continue;
-                }
-                const size_t pixelOffset =
-                    rowIndex * kStructuredScreenWidth;
-                std::copy_n(
-                    FaithfulVisiblePixelLineageStorage.data() + pixelOffset,
-                    kStructuredScreenWidth,
-                    FaithfulPrevVisiblePixelLineageStorage.data()
-                        + pixelOffset);
-            }
-            FaithfulPrevVisibleLineageClassifiedStorage =
-                FaithfulVisibleLineageClassifiedStorage;
-            if (FaithfulVisibleAllNative)
-            {
-                if (!FaithfulPrevVisibleAllNative
-                    || FaithfulPrevVisibleProductCount != 2u)
-                {
-                    ResetFaithfulVisibleProductTable(
-                        FaithfulPrevVisibleProductTable,
-                        FaithfulPrevVisibleProductCount);
-                }
-            }
-            else
-            {
-                FaithfulPrevVisibleProductTable = FaithfulVisibleProductTable;
-                FaithfulPrevVisibleProductCount = FaithfulVisibleProductCount;
-            }
-            FaithfulPrevVisibleLineageGeneration =
-                FaithfulVisibleLineageGeneration;
-            FaithfulPrevVisibleAllNative = FaithfulVisibleAllNative;
-            FaithfulPhysicalSidecarPrevReady = true;
-        }
-        else
-        {
-
-            FaithfulPrevVisiblePixelLineageStorage.fill(
-                MakeFaithfulVisibleAmbiguousPixel());
-            FaithfulPrevVisibleLineageRows.fill({});
-            FaithfulPrevVisibleLineageClassifiedStorage.fill(0u);
-            FaithfulPrevVisibleProductTable.fill({});
-            FaithfulPrevVisibleProductCount = 0u;
-            FaithfulPrevVisibleLineageGeneration = 0u;
-            FaithfulPrevVisibleAllNative = false;
-            FaithfulPhysicalSidecarPrevReady = false;
-        }
+        if (!FaithfulCompletedSnapshotPublished)
+            PublishFaithfulPhysicalSnapshot();
         FaithfulPhysicalScanoutLines.fill({});
         FaithfulLiveRenderProductLines.fill({});
 
@@ -3829,35 +3886,9 @@ void SoftRenderer::CaptureFaithfulLineRegs(u32 line, int n3dline,
                 FaithfulCaptureRecipeEncoding::FullSourceAB;
         }
 
-        FaithfulPrevLineRegsStorage = FaithfulLineRegsStorage;
-        FaithfulPrevFrameMeta = FaithfulFrameMeta;
-        {
-            static const bool sondaL = std::getenv("MELON_SONDA_LATCH") != nullptr;
-            if (sondaL)
-                fprintf(stderr, "[lat] COPIA seq=%u prevMeta0=%u\n",
-                        FaithfulFrameSeq, FaithfulPrevFrameMeta[0] & 1u);
-        }
-
-        if (std::getenv("MELON_SWAP_FLIP") != nullptr)
-            FaithfulPrevFrameMeta[0] =
-                GPU.SwapSelladoBuffer[GPU.FrontBuffer] & 1u;
-        FaithfulPrevPaletteLatch = FaithfulPaletteLatch;
-        FaithfulPrevOAMLatch = FaithfulOAMLatch;
-
-        FaithfulPrevSwapScanout = FaithfulSwapScanout;
-        if (FaithfulComponerActivo[0] || FaithfulComponerActivo[1])
-            FaithfulPrevLineaCompuesta = FaithfulLineaCompuesta;
-
-        FaithfulPrevModo2Linea = FaithfulModo2Linea;
-        FaithfulPrevCaptureProduct = FaithfulCaptureProduct;
-        FaithfulPrevCaptureLineProducts = FaithfulCaptureLineProducts;
-        FaithfulPrevCaptureProductPixelMask = FaithfulCaptureProductPixelMask;
-        FaithfulPrevCaptureProductMaterial = FaithfulCaptureProductMaterial;
-        FaithfulPrevCaptureProductCausalLines =
-            FaithfulCaptureProductCausalLines;
-
-        FaithfulPrevCaptureProductRecipeSlot =
-            FaithfulCaptureProductRecipeSlot;
+        if (!FaithfulCompletedSnapshotPublished)
+            PublishFaithfulRegisterSnapshot();
+        FaithfulCompletedSnapshotPublished = false;
         FaithfulCaptureProductRecipeSlot ^= 1u;
 
         CollectUnreferencedFaithfulCaptureProducts();
@@ -7346,42 +7377,31 @@ void SoftRenderer::DrawScanlineActivePipeline(u32 line, Unit* unit)
         if (con3dPre)
         {
 
-            u32* linea3d = GPU.GPU3D.GetLine(n3dline);
-            const size_t engPre = 0u;
-            u32* dst = FaithfulLineaCompuesta.data()
-                     + (engPre * kStructuredScreenHeight + line) * 256u;
+            u32* dst = FaithfulLineaCompuesta.data() + line * 256u;
+            u32* operands = FaithfulLine3DOperands.data() + line * 256u;
             for (u32 i = 0; i < 256u; i++)
             {
-                u32 val = BGOBJLine[i];
+                const u32 val = BGOBJLine[i];
                 const u32 control = BGOBJLine[512u + i];
                 const u32 compmode = (control >> 24u) & 0xFu;
-                if (linea3d != nullptr && compmode <= 4u)
+                if (compmode <= 4u)
                 {
-                    const u32 _3dval = linea3d[i];
-                    const bool has3d = (_3dval >> 24u) != 0u;
-                    if (compmode == 4u)
-                        val = has3d ? ColorBlend5(_3dval, val)
-                                    : BGOBJLine[256u + i];
-                    else if (compmode == 1u)
-                        val = has3d
-                            ? ColorBlend4(val, _3dval,
-                                          (control >> 8u) & 0x1Fu,
-                                          (control >> 16u) & 0x1Fu)
-                            : BGOBJLine[256u + i];
-                    else if (has3d)
-                    {
-                        const u32 evy = (control >> 8u) & 0x1Fu;
-                        val = _3dval;
-                        if      (compmode == 2u) val = ColorBrightnessUp(val, evy, 0x8u);
-                        else if (compmode == 3u) val = ColorBrightnessDown(val, evy, 0x7u);
-                    }
-                    else
-                        val = BGOBJLine[256u + i];
+                    dst[i] = BGOBJLine[256u + i] & 0x00FFFFFFu;
+                    operands[i] = (val & 0x3Fu)
+                        | (((val >> 8u) & 0x3Fu) << 6u)
+                        | (((val >> 16u) & 0x3Fu) << 12u)
+                        | (((control >> 8u) & 0x1Fu) << 18u)
+                        | (((control >> 16u) & 0x1Fu) << 23u)
+                        | ((compmode + 1u) << 28u);
                 }
-                dst[i] = val & 0x00FFFFFFu;
+                else
+                {
+                    dst[i] = val & 0x00FFFFFFu;
+                    operands[i] = 0u;
+                }
             }
-            FaithfulLineRegsStorage[(engPre * kStructuredScreenHeight + line)
-                                    * kFaithfulRegsPerLine + 18u] |= (1u << 12u);
+            FaithfulLineRegsStorage[line * kFaithfulRegsPerLine + 18u]
+                |= (1u << 12u);
         }
         else
         {
@@ -7426,6 +7446,8 @@ void SoftRenderer::DrawScanlineActivePipeline(u32 line, Unit* unit)
             }
             else
             {
+                std::fill_n(FaithfulLine3DOperands.data() + line * 256u,
+                            256u, 0u);
                 ClearFaithfulCaptureLineProduct(0u, line);
             }
             FaithfulLineRegsStorage[(engPre * kStructuredScreenHeight + line)
