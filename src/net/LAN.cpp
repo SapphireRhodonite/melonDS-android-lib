@@ -20,6 +20,7 @@
 #include <string.h>
 #include <algorithm>
 #include <array>
+#include <cerrno>
 
 #ifdef __WIN32__
     #include <winsock2.h>
@@ -108,17 +109,23 @@ enum
 const int kDiscoveryPort = 7063;
 const int kLANPort = 7064;
 
-bool LAN::BindInterface(ENetSocket socket, unsigned index)
+LAN::InterfaceBinding LAN::BindInterface(ENetSocket socket, unsigned index)
 {
 #ifdef SO_BINDTODEVICE
     char name[IF_NAMESIZE];
-    return index && if_indextoname(index, name)
-        && setsockopt(socket, SOL_SOCKET, SO_BINDTODEVICE, name, strlen(name) + 1) == 0;
-#elif defined(IP_BOUND_IF)
-    return index && setsockopt(socket, IPPROTO_IP, IP_BOUND_IF, &index, sizeof(index)) == 0;
-#else
-    return false;
+    if (!index || !if_indextoname(index, name))
+        return InterfaceBinding::Failed;
+    if (setsockopt(socket, SOL_SOCKET, SO_BINDTODEVICE, name, strlen(name) + 1) == 0)
+        return InterfaceBinding::Bound;
+#ifdef __ANDROID__
+    if (errno == EPERM)
+        return InterfaceBinding::PermissionDenied;
 #endif
+#elif defined(IP_BOUND_IF)
+    if (index && setsockopt(socket, IPPROTO_IP, IP_BOUND_IF, &index, sizeof(index)) == 0)
+        return InterfaceBinding::Bound;
+#endif
+    return InterfaceBinding::Failed;
 }
 
 static ENetHost* CreateEndpoint(const ENetAddress& address, unsigned interfaceIndex)
@@ -126,7 +133,17 @@ static ENetHost* CreateEndpoint(const ENetAddress& address, unsigned interfaceIn
     if (!interfaceIndex) return enet_host_create(&address, 16, 2, 0, 0);
     ENetHost* host = enet_host_create(nullptr, 16, 2, 0, 0);
     if (!host) return nullptr;
-    if (!LAN::BindInterface(host->socket, interfaceIndex) || enet_socket_bind(host->socket, &address) < 0 ||
+    const auto binding = LAN::BindInterface(host->socket, interfaceIndex);
+    bool configured = binding == LAN::InterfaceBinding::Bound;
+#ifdef __ANDROID__
+    if (binding == LAN::InterfaceBinding::PermissionDenied && address.host != ENET_HOST_ANY)
+    {
+        const auto outputInterface = htonl(interfaceIndex);
+        configured = setsockopt(host->socket, IPPROTO_IP, IP_UNICAST_IF,
+                                &outputInterface, sizeof(outputInterface)) == 0;
+    }
+#endif
+    if (!configured || enet_socket_bind(host->socket, &address) < 0 ||
         enet_socket_get_address(host->socket, &host->address) < 0)
     {
         enet_host_destroy(host);

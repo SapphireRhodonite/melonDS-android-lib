@@ -86,7 +86,8 @@ public:
 
     bool StartDiscovery();
     void EndDiscovery();
-    static bool BindInterface(ENetSocket socket, unsigned index);
+    enum class InterfaceBinding { Bound = 0, PermissionDenied = 1, Failed = 2 };
+    static InterfaceBinding BindInterface(ENetSocket socket, unsigned index);
     bool StartHost(const char* player, int numplayers, bool hle = false, u32 bindAddress = ENET_HOST_ANY, unsigned interfaceIndex = 0);
     bool StartClient(const char* player, const char* host, bool hle = false, u32 bindAddress = ENET_HOST_ANY, unsigned interfaceIndex = 0);
     void EndSession();
