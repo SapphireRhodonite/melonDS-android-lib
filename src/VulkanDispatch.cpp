@@ -1085,6 +1085,7 @@ bool Initialize()
     const char* systemDriverLibrary = nullptr;
     if (gVulkanHandle == nullptr)
     {
+#ifndef MELONDS_SYSTEM_VULKAN_ONLY
         const char* configuredLibrary = std::getenv("MELON_VULKAN_LIBRARY");
         if (configuredLibrary != nullptr && configuredLibrary[0] != '\0')
         {
@@ -1103,6 +1104,7 @@ bool Initialize()
             }
             systemDriverLibrary = configuredLibrary;
         }
+#endif
 
 #if defined(__APPLE__)
         constexpr std::array<const char*, 2> defaultSystemLibraries = {
